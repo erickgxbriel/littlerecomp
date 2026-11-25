@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Bold crimson diagonal scar / ribbon -->
+    <path
+        android:fillColor="#C81E2B"
+        android:pathData="M31,79 L71,29 L78,35 L38,85 Z" />
+    <!-- Thin highlight along crimson slash -->
+    <path
+        android:fillColor="#E9424F"
+        android:pathData="M31,79 L71,29 L73,31 L33,81 Z" />
+    <!-- Stylized minimalist Miami palm silhouette (center-left light side) -->
+    <path
+        android:fillColor="#141418"
+        android:pathData="M43,72 C43,60 44,49 46,40 L48,40 C46.5,49 46,60 46.5,72 Z" />
+    <path
+        android:fillColor="#141418"
+        android:pathData="M46,41 C41,38 35,38 30,42 C35,40.5 40,41 45,43 Z" />
+    <path
+        android:fillColor="#141418"
+        android:pathData="M46,40 C41,34 36,32 32,33 C36,34.5 41,37 45,41 Z" />
+    <path
+        android:fillColor="#141418"
+        android:pathData="M47,40 C47,33 44,28 40,26 C44,29.5 45.5,34 46,40 Z" />
+    <path
+        android:fillColor="#141418"
+        android:pathData="M47,40 C51,34 56,33 61,36 C56,36 51,38 48,41 Z" />
+    <!-- Subtle white accent bar on dark right side (Android / Mobile cue) -->
+    <path
+        android:fillColor="#F2F2F2"
+        android:pathData="M62,64 L76,64 L76,69 L62,69 Z" />
+    <path
+        android:fillColor="#C81E2B"
+        android:pathData="M62,72 L72,72 L72,76 L62,76 Z" />
+</vector>

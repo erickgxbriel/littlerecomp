@@ -1,0 +1,223 @@
+{
+    "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+    "format": 1,
+    "name": "Scarface Recomp",
+    "repo": "efm-games/scarface-recomp",
+    "game": {
+        "kind": "iso_or_folder",
+        "label": "Your own Xbox copy of Scarface: The World Is Yours: a disc image (.iso/.xiso), or an extracted folder holding default.xbe.",
+        "check": { "file": "default.xbe", "xdvdfs": "default.xbe" },
+        "dumps": [
+            { "name": "USA/Europe full DVD", "size": 7825162240, "crc32": "1e4c0208" }
+        ]
+    },
+    "start": {
+        "program": ["Scarface.exe"],
+        "args": ["--game", "{game}", "--no-launcher"]
+    },
+    "prepare": {
+        "program": ["Scarface.exe"],
+        "args": ["--prepare", "--game", "{game}"],
+        "label": "Building the game's code",
+        "timeout": 5400,
+        "version": "1.3.2",
+        "done": ["{install}/Scarface.dll"]
+    },
+    "config": [
+        {
+            "id": "main",
+            "format": "toml",
+            "file": [{ "path": "{install}/settings.toml" }],
+            "game_path": "game"
+        }
+    ],
+    "saves": ["{install}/hdd/E/UDATA/5655003F"],
+    "folders": {
+        "saves": [{ "path": "{install}/hdd/E/UDATA/5655003F" }],
+        "logs": [{ "path": "{install}/logs" }],
+        "screenshots": [{ "path": "{install}/screenshots" }]
+    },
+    "exit_codes": {
+        "1": "The game could not start. It may not have found your copy, or the one-time compilation of the game's code failed. Check logs\\scarface.log and logs\\compile.log in the game's folder, then pick your copy again on the game's page."
+    },
+    "groups": [
+        { "id": "display" },
+        { "id": "gameplay" },
+        { "id": "controls" },
+        { "id": "advanced", "advanced": true }
+    ],
+    "settings": [
+        {
+            "id": "display_mode",
+            "label": "Display mode",
+            "group": "display",
+            "help": "Borderless fills the screen without changing its mode. Fullscreen switches the monitor; Windowed uses the size below.",
+            "choices": [
+                { "label": "Borderless", "set": { "display_mode": "\"borderless\"" } },
+                { "label": "Fullscreen", "set": { "display_mode": "\"fullscreen\"" } },
+                { "label": "Windowed", "set": { "display_mode": "\"windowed\"" } }
+            ],
+            "defaults": { "display_mode": "\"borderless\"" }
+        },
+        {
+            "id": "resolution",
+            "label": "Resolution",
+            "group": "display",
+            "help": "The size of the game's window and fullscreen picture. Desktop follows your monitor.",
+            "choices": [
+                { "label": "Desktop", "set": { "width": "0", "height": "0" } },
+                { "label": "1280 x 720", "set": { "width": "1280", "height": "720" } },
+                { "label": "1920 x 1080", "set": { "width": "1920", "height": "1080" } },
+                { "label": "2560 x 1440", "set": { "width": "2560", "height": "1440" } },
+                { "label": "3840 x 2160", "set": { "width": "3840", "height": "2160" } }
+            ],
+            "defaults": { "width": "0", "height": "0" }
+        },
+        {
+            "id": "render_scale",
+            "label": "Render scale",
+            "group": "display",
+            "help": "The 3D picture is drawn at this percentage of the output size. 100% is the game's own detail; lower values are faster.",
+            "choices": [
+                { "label": "50%", "set": { "render_percent": "50" } },
+                { "label": "75%", "set": { "render_percent": "75" } },
+                { "label": "100%", "set": { "render_percent": "100" } },
+                { "label": "150%", "set": { "render_percent": "150" } },
+                { "label": "200%", "set": { "render_percent": "200" } }
+            ],
+            "defaults": { "render_percent": "100" }
+        },
+        {
+            "id": "frame_rate",
+            "label": "Frame rate cap",
+            "group": "display",
+            "help": "The game renders at about 30 fps on its own, so a cap can only lower it. Unlimited removes the extra cap; the Experimental setting below is the only way to raise the rate.",
+            "choices": [
+                { "label": "60 fps", "set": { "fps_cap": "60" } },
+                { "label": "30 fps", "set": { "fps_cap": "30" } },
+                { "label": "Monitor refresh", "set": { "fps_cap": "1" } },
+                { "label": "Unlimited", "set": { "fps_cap": "0" } }
+            ],
+            "defaults": { "fps_cap": "60" }
+        },
+        {
+            "id": "antialiasing",
+            "label": "Antialiasing",
+            "group": "display",
+            "help": "FXAA smooths jagged edges in the final picture after gamma correction.",
+            "choices": [
+                { "label": "Off", "set": { "antialiasing": "\"off\"" } },
+                { "label": "FXAA", "set": { "antialiasing": "\"fxaa\"" } }
+            ],
+            "defaults": { "antialiasing": "\"off\"" }
+        },
+        {
+            "id": "vsync",
+            "label": "V-Sync",
+            "group": "display",
+            "help": "Waits for the monitor instead of showing a frame as soon as it is ready.",
+            "choices": [
+                { "label": "On", "set": { "vsync": "true" } },
+                { "label": "Off", "set": { "vsync": "false" } }
+            ],
+            "defaults": { "vsync": "true" }
+        },
+        {
+            "id": "anisotropic",
+            "label": "Texture filtering",
+            "group": "display",
+            "help": "Keeps textures sharp at shallow angles. As the game asks uses the original setting.",
+            "choices": [
+                { "label": "As the game asks", "set": { "anisotropic_filtering": "0" } },
+                { "label": "2x", "set": { "anisotropic_filtering": "2" } },
+                { "label": "4x", "set": { "anisotropic_filtering": "4" } },
+                { "label": "8x", "set": { "anisotropic_filtering": "8" } },
+                { "label": "16x", "set": { "anisotropic_filtering": "16" } }
+            ],
+            "defaults": { "anisotropic_filtering": "0" }
+        },
+        {
+            "id": "show_fps",
+            "label": "Show FPS",
+            "group": "display",
+            "help": "A small frame-rate counter in the top left corner of the game.",
+            "choices": [
+                { "label": "Off", "set": { "show_fps": "false" } },
+                { "label": "On", "set": { "show_fps": "true" } }
+            ],
+            "defaults": { "show_fps": "false" }
+        },
+        {
+            "id": "skip_intro",
+            "label": "Intro movies",
+            "group": "gameplay",
+            "help": "The logos and opening movie when the game starts.",
+            "choices": [
+                { "label": "Play them", "set": { "skip_intro": "false" } },
+                { "label": "Skip them", "set": { "skip_intro": "true" } }
+            ],
+            "defaults": { "skip_intro": "false" }
+        },
+        {
+            "id": "all_cheats",
+            "label": "Cheat menu",
+            "group": "gameplay",
+            "help": "Makes every pause-menu cheat code selectable from a new game. You still choose the effects in game.",
+            "choices": [
+                { "label": "As the game", "set": { "all_cheats_unlocked": "false" } },
+                { "label": "All unlocked", "set": { "all_cheats_unlocked": "true" } }
+            ],
+            "defaults": { "all_cheats_unlocked": "false" }
+        },
+        {
+            "id": "keyboard_mouse",
+            "label": "Keyboard and mouse (opt-in)",
+            "group": "controls",
+            "help": "Gamepad is the default. Turn this on for mouse look and fixed keys that each send one Xbox pad control; remap them in the game's Controls tab. Old keyboard settings files keep keyboard enabled.",
+            "choices": [
+                { "label": "On", "set": { "kbm": "true" } },
+                { "label": "Off", "set": { "kbm": "false" } }
+            ],
+            "defaults": { "kbm": "false" }
+        },
+        {
+            "id": "key_prompts",
+            "label": "Experimental: HUD key prompts",
+            "group": "controls",
+            "help": "Experimental: shows the keys bound to Xbox pad controls instead of controller glyphs. Context-sensitive prompts can still be misleading, so the original glyphs are the default.",
+            "choices": [
+                { "label": "On", "set": { "hud_key_prompts": "true" } },
+                { "label": "Off", "set": { "hud_key_prompts": "false" } }
+            ],
+            "defaults": { "hud_key_prompts": "false" }
+        },
+        {
+            "id": "modern_pad",
+            "label": "Experimental: Gamepad layout (GTA-style)",
+            "group": "controls",
+            "help": "Experimental GTA-style driving on a physical pad: right trigger accelerates and left trigger brakes. Original uses the Xbox layout.",
+            "choices": [
+                { "label": "Original", "set": { "modern_pad": "false" } },
+                { "label": "GTA-style", "set": { "modern_pad": "true" } }
+            ],
+            "defaults": { "modern_pad": "false" }
+        },
+        {
+            "id": "experimental_60fps",
+            "label": "Experimental 60 fps",
+            "group": "advanced",
+            "advanced": true,
+            "help": "Skips the game's own 30 Hz wait and fixes the rate at 60 fps. Animations run faster than on the Xbox, so leave it off unless you want that.",
+            "choices": [
+                { "label": "Off", "set": { "experimental_60fps": "false" } },
+                { "label": "On", "set": { "experimental_60fps": "true" } }
+            ],
+            "defaults": { "experimental_60fps": "false" }
+        }
+    ],
+    "actions": [
+        { "id": "saves", "label": "Saves", "help": "Your Xbox-format profiles and game saves.", "open": "saves" },
+        { "id": "logs", "label": "Logs", "help": "Start-up, compilation and game logs, useful when reporting a problem.", "open": "logs" },
+        { "id": "screenshots", "label": "Screenshots", "help": "F2 captures from the game.", "open": "screenshots" }
+    ]
+}

@@ -1,0 +1,63 @@
+# build
+/out/
+/build/
+bin/
+obj/
+*.zip
+*.pdb
+*.exe
+*.dll
+*.obj
+*.o
+*.ilk
+*.lib
+*.exp
+*.apk
+*.aab
+*.so
+*.keystore
+*.jks
+
+# Toolchain (5 GB portable compiler & archive)
+/tools/
+*.tar.*
+*.xz
+
+# Captures & raw bitmaps (troubleshooting frames)
+/cap/
+*.bmp
+
+# recompiled code, derived from the game
+/generated/
+
+# user's own game files & disc images
+/assets/
+*.iso
+*.xiso
+*.xiso.iso
+*.bin
+*.img
+*.rcf
+
+# runtime files
+settings.toml
+/logs/
+/hdd/
+/CrashDumps/
+dev/crash*
+dev/save-backup-*/
+*.dmp
+*.log
+
+# editors
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Local development tools, captures and the upstream SDK copy are not shipped
+/dev/
+/XboxXBERecomp-main/
+.local
+__pycache__/
