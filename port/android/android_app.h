@@ -11,6 +11,7 @@ namespace gpu {
 
 struct VulkanStats {
     float guest_fps = 0.0f;
+    float cpu_ms = 0.0f;
     float scale = 1.5f;
     uint64_t frames = 0;
     uint64_t draws = 0;
@@ -39,7 +40,7 @@ struct AndroidExtras {
     float render_scale = 1.5f;  // 1.0, 1.5 (default), 2.0
     int upscaler = 1;           // 0 = Bilinear, 1 = Snapdragon GSR v1 (FP16), 2 = FSR 1.0 (FP16)
     bool pin_big_cores = true;
-    int hud_mode = 0;           // 0 = Off, 1 = Compact (FPS + Temp), 2 = Full Telemetry
+    int hud_mode = 0;           // 0 = Off, 1 = FPS Only, 2 = Basic (FPS + Temp), 3 = Advanced
     int language = 0;           // 0 = Auto, 1 = EN, 2 = PT-BR
     bool native_aux_rt = true;  // Keep off-screen auxiliary RTs at 1.0x scale
     bool thermal_drs = false;   // Step down scale when SoC thermal status is Severe

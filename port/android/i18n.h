@@ -76,8 +76,9 @@ enum class Str : int {
     LblPinBigCores,
     LblHudMode,
     HudModeOff,
-    HudModeCompact,
-    HudModeFull,
+    HudModeFpsOnly,
+    HudModeBasic,
+    HudModeAdvanced,
 
     LblTouchControls,
     LblTouchOpacity,

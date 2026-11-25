@@ -105,6 +105,17 @@ void DrawLanguagePills() {
     pill("English", 1);
 }
 
+void EnableTouchDragScroll() {
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && !ImGui::IsAnyItemActive() &&
+        ImGui::IsMouseDragging(ImGuiMouseButton_Left, 6.0f)) {
+        float max_y = ImGui::GetScrollMaxY();
+        if (max_y > 0.0f) {
+            float next_y = std::clamp(ImGui::GetScrollY() - ImGui::GetIO().MouseDelta.y, 0.0f, max_y);
+            ImGui::SetScrollY(next_y);
+        }
+    }
+}
+
 }  // namespace
 
 AndroidExtras& AndroidSettings() {
@@ -247,7 +258,7 @@ void Load() {
     ex.render_scale = std::clamp(static_cast<float>(t["android_render_scale"].value_or(double(ex.render_scale))), 1.0f, 2.0f);
     ex.upscaler = std::clamp(int(t["android_upscaler"].value_or(int64_t(ex.upscaler))), 0, 2);
     ex.pin_big_cores = t["android_pin_big_cores"].value_or(ex.pin_big_cores);
-    ex.hud_mode = std::clamp(int(t["android_hud_mode"].value_or(int64_t(s.show_fps ? 1 : ex.hud_mode))), 0, 2);
+    ex.hud_mode = std::clamp(int(t["android_hud_mode"].value_or(int64_t(s.show_fps ? 2 : ex.hud_mode))), 0, 3);
     ex.language = std::clamp(int(t["android_language"].value_or(int64_t(ex.language))), 0, 2);
     ex.native_aux_rt = t["android_native_aux_rt"].value_or(ex.native_aux_rt);
     ex.thermal_drs = t["android_thermal_drs"].value_or(ex.thermal_drs);
@@ -411,48 +422,50 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
     gpu::VulkanStats vst = gpu::GetVulkanStats();
     adpf::ThermalInfo th = adpf::PollThermal(CachedBatteryTempC());
 
-    static const char* kUpscaleNames[3] = {"Bilinear", "GSR v1 FP16", "FSR 1.0 FP16"};
+    static const char* kShortUp[3] = {"Bilinear", "GSR", "FSR"};
 
     // 1. Performance / GPU Temp HUD (Top-left corner, away from top-right MENU)
     if (st.game_booted && ex.hud_mode > 0) {
         const float safe_x = std::max(28.0f, view_w * 0.022f);
-        ImGui::SetNextWindowPos(ImVec2(safe_x, 16.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(safe_x, 14.0f), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.68f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 5.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 2.0f));
         ImGuiWindowFlags hud_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
                                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs;
         if (ImGui::Begin("##PerfHUD", nullptr, hud_flags)) {
             const char* sensor_lbl = th.is_gpu_sensor ? i18n::T(i18n::Str::HudGpu) : i18n::T(i18n::Str::HudBat);
             if (ex.hud_mode == 1) {
-                ImGui::Text("FPS: %.1f", vst.guest_fps);
+                ImGui::Text("%.1f FPS", vst.guest_fps);
+            } else if (ex.hud_mode == 2) {
+                ImGui::Text("%.1f FPS", vst.guest_fps);
                 if (th.temp_c > 0.0f) {
                     ImGui::SameLine();
-                    ImGui::Text("| %s: %.0f°C", sensor_lbl, th.temp_c);
+                    ImGui::Text("| %s %.0f°C", sensor_lbl, th.temp_c);
                 }
                 if (th.thermal_status_valid) {
                     ImGui::SameLine();
                     ImGui::TextColored(ThermalStatusColor(th.thermal_status), "(%s)", ThermalStatusLabel(th.thermal_status));
                 }
             } else {
-                const char* up_name = kUpscaleNames[std::clamp(ex.upscaler, 0, 2)];
-                ImGui::Text("LittleRecomp | Guest: %.1f fps | UI: %.1f fps | %.2fx (%s)",
-                            vst.guest_fps, ui_fps, vst.scale, up_name);
-                ImGui::Text("Draws: %llu | RP: %llu | Tex: %zu (%zuMB) | PSO/SPV: %zu/%zu | Audio: %.3f",
-                            static_cast<unsigned long long>(vst.draws),
-                            static_cast<unsigned long long>(vst.rp_opens),
-                            vst.cached_textures, vst.tex_vram_mb, vst.pso_count, vst.spv_count, ast.rms);
+                const float frame_ms = (vst.guest_fps > 0.5f) ? (1000.0f / vst.guest_fps) : 0.0f;
+                const int res_p = int(std::round(480.0f * vst.scale));
+                const char* up_short = kShortUp[std::clamp(ex.upscaler, 0, 2)];
+                ImGui::Text("%.1f FPS (%.1fms) | CPU %.1fms", vst.guest_fps, frame_ms, vst.cpu_ms);
                 if (th.temp_c > 0.0f) {
-                    ImGui::Text("%s: %.1f°C", sensor_lbl, th.temp_c);
-                    if (th.thermal_status_valid) {
-                        ImGui::SameLine();
-                        ImGui::TextColored(ThermalStatusColor(th.thermal_status), "| %s", ThermalStatusLabel(th.thermal_status));
-                    }
-                } else if (th.thermal_status_valid) {
-                    ImGui::TextColored(ThermalStatusColor(th.thermal_status), "%s", ThermalStatusLabel(th.thermal_status));
+                    ImGui::SameLine();
+                    ImGui::Text("| %s %.0f°C", sensor_lbl, th.temp_c);
                 }
+                if (th.thermal_status_valid) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ThermalStatusColor(th.thermal_status), "(%s)", ThermalStatusLabel(th.thermal_status));
+                }
+                ImGui::TextDisabled("%dp (%.1fx %s) | VRAM %zuMB", res_p, vst.scale, up_short, vst.tex_vram_mb);
             }
         }
         ImGui::End();
+        ImGui::PopStyleVar(2);
     }
 
     // 2. Non-intrusive SHA-1 mismatch warning pill while booting
@@ -483,6 +496,7 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
 
             // 3-Step Installation Tutorial Card
             ImGui::BeginChild("##TutorialBox", ImVec2(0, ImGui::GetContentRegionAvail().y * 0.54f), true);
+            EnableTouchDragScroll();
             ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.40f, 1.0f), "%s", i18n::T(i18n::Str::WizardStep1Title));
             ImGui::TextWrapped("%s", i18n::T(i18n::Str::WizardStep1Desc));
             ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.40f, 1.0f), "%s", i18n::T(i18n::Str::WizardStep2Title));
@@ -557,134 +571,168 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
 
     // 4. Tabbed Options Overlay
     ImGui::SetNextWindowPos(ImVec2(view_w * 0.5f, view_h * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(std::clamp(view_w * 0.76f, 700.0f, 1740.0f),
-                                    std::clamp(view_h * 0.86f, 520.0f, 960.0f)),
+    ImGui::SetNextWindowSize(ImVec2(std::clamp(view_w * 0.80f, 680.0f, 1780.0f),
+                                    std::clamp(view_h * 0.88f, 480.0f, 980.0f)),
                              ImGuiCond_Always);
     if (ImGui::Begin(i18n::T(i18n::Str::OptionsTitle), nullptr,
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize)) {
-        ImGui::Text("%s (%s) | %s", st.gpu_name.c_str(), st.vulkan_ver.c_str(), cpu_affinity::Summary().c_str());
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+        ImGui::TextDisabled("%s (%s) | %s", st.gpu_name.c_str(), st.vulkan_ver.c_str(), cpu_affinity::Summary().c_str());
         if (!st.warning.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.35f, 1.0f), "%s", st.warning.c_str());
         }
         ImGui::Separator();
 
+        const float footer_h = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 2.0f + 4.0f;
         bool open_credits = g_open_credits_requested.exchange(false, std::memory_order_relaxed);
         if (ImGui::BeginTabBar("##OptionsTabs")) {
             if (ImGui::BeginTabItem(i18n::T(i18n::Str::TabGraphics))) {
-                ImGui::Text("%s:", i18n::T(i18n::Str::LblScale));
-                ImGui::SameLine();
-                if (ImGui::RadioButton(i18n::T(i18n::Str::LblScale10), std::fabs(ex.render_scale - 1.0f) < 0.1f)) {
-                    ex.render_scale = 1.0f;
-                    Save();
-                }
-                ImGui::SameLine();
-                if (ImGui::RadioButton(i18n::T(i18n::Str::LblScale15), std::fabs(ex.render_scale - 1.5f) < 0.1f)) {
-                    ex.render_scale = 1.5f;
-                    Save();
-                }
-                ImGui::SameLine();
-                if (ImGui::RadioButton(i18n::T(i18n::Str::LblScale20), std::fabs(ex.render_scale - 2.0f) < 0.1f)) {
-                    ex.render_scale = 2.0f;
-                    Save();
-                }
+                if (ImGui::BeginChild("##TabBody", ImVec2(0, -footer_h), false)) {
+                    EnableTouchDragScroll();
+                    ImGui::Text("%s:", i18n::T(i18n::Str::LblScale));
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::LblScale10), std::fabs(ex.render_scale - 1.0f) < 0.1f)) {
+                        ex.render_scale = 1.0f;
+                        Save();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::LblScale15), std::fabs(ex.render_scale - 1.5f) < 0.1f)) {
+                        ex.render_scale = 1.5f;
+                        Save();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::LblScale20), std::fabs(ex.render_scale - 2.0f) < 0.1f)) {
+                        ex.render_scale = 2.0f;
+                        Save();
+                    }
 
-                ImGui::Text("%s:", i18n::T(i18n::Str::LblUpscaler));
-                ImGui::SameLine();
-                if (ImGui::RadioButton("Snapdragon GSR v1", ex.upscaler == 1)) { ex.upscaler = 1; Save(); }
-                ImGui::SameLine();
-                if (ImGui::RadioButton("FSR 1.0", ex.upscaler == 2)) { ex.upscaler = 2; Save(); }
-                ImGui::SameLine();
-                if (ImGui::RadioButton("Bilinear", ex.upscaler == 0)) { ex.upscaler = 0; Save(); }
+                    ImGui::Text("%s:", i18n::T(i18n::Str::LblUpscaler));
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton("Snapdragon GSR v1", ex.upscaler == 1)) { ex.upscaler = 1; Save(); }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton("FSR 1.0", ex.upscaler == 2)) { ex.upscaler = 2; Save(); }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton("Bilinear", ex.upscaler == 0)) { ex.upscaler = 0; Save(); }
 
-                ImGui::Separator();
-                if (ImGui::Checkbox(i18n::T(i18n::Str::LblExperimental60Fps), &s.experimental_60fps)) Save();
-                if (ImGui::Checkbox(i18n::T(i18n::Str::LblNativeAuxRt), &ex.native_aux_rt)) Save();
-                ImGui::TextDisabled("  %s", i18n::T(i18n::Str::LblNativeAuxRtHint));
-                if (ImGui::Checkbox(i18n::T(i18n::Str::LblThermalDrs), &ex.thermal_drs)) Save();
-                ImGui::TextDisabled("  %s", i18n::T(i18n::Str::LblThermalDrsHint));
-                if (ImGui::Checkbox(i18n::T(i18n::Str::LblPinBigCores), &ex.pin_big_cores)) {
-                    g_repin_guest.store(true, std::memory_order_release);
-                    cpu_affinity::RequestRepinRender();
-                    Save();
-                }
+                    ImGui::Separator();
+                    if (ImGui::BeginTable("##GfxToggles", 2, ImGuiTableFlags_SizingStretchSame)) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        if (ImGui::Checkbox(i18n::T(i18n::Str::LblExperimental60Fps), &s.experimental_60fps)) Save();
+                        ImGui::TableSetColumnIndex(1);
+                        if (ImGui::Checkbox(i18n::T(i18n::Str::LblNativeAuxRt), &ex.native_aux_rt)) Save();
+                        ImGui::TextDisabled("  %s", i18n::T(i18n::Str::LblNativeAuxRtHint));
 
-                ImGui::Separator();
-                ImGui::Text("%s:", i18n::T(i18n::Str::LblHudMode));
-                ImGui::SameLine();
-                if (ImGui::RadioButton(i18n::T(i18n::Str::HudModeOff), ex.hud_mode == 0)) {
-                    ex.hud_mode = 0;
-                    s.show_fps = false;
-                    Save();
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        if (ImGui::Checkbox(i18n::T(i18n::Str::LblPinBigCores), &ex.pin_big_cores)) {
+                            g_repin_guest.store(true, std::memory_order_release);
+                            cpu_affinity::RequestRepinRender();
+                            Save();
+                        }
+                        ImGui::TableSetColumnIndex(1);
+                        if (ImGui::Checkbox(i18n::T(i18n::Str::LblThermalDrs), &ex.thermal_drs)) Save();
+                        ImGui::TextDisabled("  %s", i18n::T(i18n::Str::LblThermalDrsHint));
+                        ImGui::EndTable();
+                    }
+
+                    ImGui::Separator();
+                    ImGui::Text("%s:", i18n::T(i18n::Str::LblHudMode));
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::HudModeOff), ex.hud_mode == 0)) {
+                        ex.hud_mode = 0;
+                        s.show_fps = false;
+                        Save();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::HudModeFpsOnly), ex.hud_mode == 1)) {
+                        ex.hud_mode = 1;
+                        s.show_fps = true;
+                        Save();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::HudModeBasic), ex.hud_mode == 2)) {
+                        ex.hud_mode = 2;
+                        s.show_fps = true;
+                        Save();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::HudModeAdvanced), ex.hud_mode == 3)) {
+                        ex.hud_mode = 3;
+                        s.show_fps = true;
+                        Save();
+                    }
                 }
-                ImGui::SameLine();
-                if (ImGui::RadioButton(i18n::T(i18n::Str::HudModeCompact), ex.hud_mode == 1)) {
-                    ex.hud_mode = 1;
-                    s.show_fps = true;
-                    Save();
-                }
-                ImGui::SameLine();
-                if (ImGui::RadioButton(i18n::T(i18n::Str::HudModeFull), ex.hud_mode == 2)) {
-                    ex.hud_mode = 2;
-                    s.show_fps = true;
-                    Save();
-                }
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             }
 
             if (ImGui::BeginTabItem(i18n::T(i18n::Str::TabControls))) {
-                if (ImGui::Checkbox(i18n::T(i18n::Str::LblTouchControls), &ex.touch_controls)) Save();
-                if (ImGui::SliderFloat(i18n::T(i18n::Str::LblTouchOpacity), &ex.touch_opacity, 0.15f, 0.90f, "%.2f")) Save();
-                if (ImGui::Checkbox(i18n::T(i18n::Str::LblModernPad), &kbm::modern_pad)) Save();
-                ImGui::Separator();
-                ImGui::Text("%s %s", i18n::T(i18n::Str::LblPhysicalGamepad),
-                            st.has_physical_pad ? i18n::T(i18n::Str::GamepadConnected)
-                                                : i18n::T(i18n::Str::GamepadDisconnected));
+                if (ImGui::BeginChild("##TabBody", ImVec2(0, -footer_h), false)) {
+                    EnableTouchDragScroll();
+                    if (ImGui::Checkbox(i18n::T(i18n::Str::LblTouchControls), &ex.touch_controls)) Save();
+                    if (ImGui::SliderFloat(i18n::T(i18n::Str::LblTouchOpacity), &ex.touch_opacity, 0.15f, 0.90f, "%.2f")) Save();
+                    if (ImGui::Checkbox(i18n::T(i18n::Str::LblModernPad), &kbm::modern_pad)) Save();
+                    ImGui::Separator();
+                    ImGui::Text("%s %s", i18n::T(i18n::Str::LblPhysicalGamepad),
+                                st.has_physical_pad ? i18n::T(i18n::Str::GamepadConnected)
+                                                    : i18n::T(i18n::Str::GamepadDisconnected));
+                }
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             }
 
             if (ImGui::BeginTabItem(i18n::T(i18n::Str::TabGameLang))) {
-                ImGui::Text("%s:", i18n::T(i18n::Str::LblUiLanguage));
-                ImGui::SameLine();
-                DrawLanguagePills();
-                ImGui::Separator();
+                if (ImGui::BeginChild("##TabBody", ImVec2(0, -footer_h), false)) {
+                    EnableTouchDragScroll();
+                    ImGui::Text("%s:", i18n::T(i18n::Str::LblUiLanguage));
+                    ImGui::SameLine();
+                    DrawLanguagePills();
+                    ImGui::Separator();
 
-                if (ImGui::Checkbox(i18n::T(i18n::Str::LblSkipIntro), &s.skip_intro)) Save();
-                if (ImGui::Checkbox(i18n::T(i18n::Str::LblUnlockCheats), &s.all_cheats_unlocked)) Save();
-                ImGui::Separator();
+                    if (ImGui::Checkbox(i18n::T(i18n::Str::LblSkipIntro), &s.skip_intro)) Save();
+                    if (ImGui::Checkbox(i18n::T(i18n::Str::LblUnlockCheats), &s.all_cheats_unlocked)) Save();
+                    ImGui::Separator();
 
-                if (ImGui::Button(i18n::T(i18n::Str::BtnSelectIso))) {
-                    OpenIsoPicker();
-                }
-                ImGui::SameLine();
-                if (ImGui::Button(i18n::T(i18n::Str::BtnSelectFolder))) {
-                    if (!HasAllFilesAccess()) RequestAllFilesAccess();
-                    else OpenFolderPicker();
-                }
+                    if (ImGui::Button(i18n::T(i18n::Str::BtnSelectIso))) {
+                        OpenIsoPicker();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button(i18n::T(i18n::Str::BtnSelectFolder))) {
+                        if (!HasAllFilesAccess()) RequestAllFilesAccess();
+                        else OpenFolderPicker();
+                    }
 
-                static char path_buf[512] = {};
-                if (path_buf[0] == '\0' && !s.game.empty()) {
-                    std::snprintf(path_buf, sizeof(path_buf), "%s", s.game.c_str());
+                    static char path_buf[512] = {};
+                    if (path_buf[0] == '\0' && !s.game.empty()) {
+                        std::snprintf(path_buf, sizeof(path_buf), "%s", s.game.c_str());
+                    }
+                    ImGui::InputText(i18n::T(i18n::Str::LblCurrentGamePath), path_buf, sizeof(path_buf));
+                    if (ImGui::Button(i18n::T(i18n::Str::LblApplyPathRetry))) {
+                        ex.game_uri.clear();
+                        ex.game_display_name.clear();
+                        s.game = path_buf;
+                        Save();
+                        RequestBootRetry();
+                    }
                 }
-                ImGui::InputText(i18n::T(i18n::Str::LblCurrentGamePath), path_buf, sizeof(path_buf));
-                if (ImGui::Button(i18n::T(i18n::Str::LblApplyPathRetry))) {
-                    ex.game_uri.clear();
-                    ex.game_display_name.clear();
-                    s.game = path_buf;
-                    Save();
-                    RequestBootRetry();
-                }
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             }
 
             ImGuiTabItemFlags cred_flags = open_credits ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
             if (ImGui::BeginTabItem(i18n::T(i18n::Str::TabCredits), nullptr, cred_flags)) {
-                ImGui::TextColored(ImVec4(0.95f, 0.25f, 0.30f, 1.0f), "%s", i18n::T(i18n::Str::CreditsHeading));
-                ImGui::Separator();
-                ImGui::TextWrapped("%s", i18n::T(i18n::Str::CreditsBody));
-                ImGui::Separator();
-                ImGui::Text("%s GPU=%s | Vulkan=%s | %s", i18n::T(i18n::Str::CreditsTechInfo),
-                            st.gpu_name.c_str(), st.vulkan_ver.c_str(), cpu_affinity::Summary().c_str());
-                ImGui::Text("Storage: %s", ExeDir().c_str());
+                if (ImGui::BeginChild("##TabBody", ImVec2(0, -footer_h), false)) {
+                    EnableTouchDragScroll();
+                    ImGui::TextColored(ImVec4(0.95f, 0.25f, 0.30f, 1.0f), "%s", i18n::T(i18n::Str::CreditsHeading));
+                    ImGui::Separator();
+                    ImGui::TextWrapped("%s", i18n::T(i18n::Str::CreditsBody));
+                    ImGui::Separator();
+                    ImGui::Text("%s GPU=%s | Vulkan=%s | %s", i18n::T(i18n::Str::CreditsTechInfo),
+                                st.gpu_name.c_str(), st.vulkan_ver.c_str(), cpu_affinity::Summary().c_str());
+                    ImGui::Text("Storage: %s", ExeDir().c_str());
+                }
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
@@ -695,10 +743,13 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
             Save();
         }
         ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.14f, 0.19f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.86f, 0.20f, 0.25f, 1.0f));
         if (ImGui::Button(i18n::T(i18n::Str::LblResume))) {
             Save();
             ToggleOverlay();
         }
+        ImGui::PopStyleColor(2);
     }
     ImGui::End();
 }

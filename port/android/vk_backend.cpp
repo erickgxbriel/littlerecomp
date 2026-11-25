@@ -3663,9 +3663,11 @@ void VulkanBackend::Present(const Surface& front) {
                 else pers_d++;
             }
         }
+        const double fdiv_stats = std::max<double>(double(sec_frames_), 1.0);
         {
             std::lock_guard<std::mutex> lk(g_stats_lock);
             g_stats.guest_fps = fps_val_;
+            g_stats.cpu_ms = static_cast<float>((double(sec_cpu_ns_) / 1e6) / fdiv_stats);
             g_stats.scale = scale_;
             g_stats.frames = presents_;
             g_stats.draws = total_draws_;

@@ -411,8 +411,10 @@ void ApplyMobileTheme(float scale) {
     st.FrameRounding = 6.0f;
     st.GrabRounding = 6.0f;
     st.TabRounding = 6.0f;
-    st.FramePadding = ImVec2(10.0f, 7.0f);
-    st.ItemSpacing = ImVec2(10.0f, 8.0f);
+    st.WindowPadding = ImVec2(12.0f, 8.0f);
+    st.FramePadding = ImVec2(8.0f, 5.0f);
+    st.ItemSpacing = ImVec2(8.0f, 5.0f);
+    st.ScrollbarSize = 14.0f;
     st.Colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.08f, 0.10f, 0.94f);
     st.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.45f, 0.08f, 0.11f, 1.0f);
     st.Colors[ImGuiCol_Tab] = ImVec4(0.16f, 0.16f, 0.20f, 1.0f);
@@ -496,7 +498,7 @@ int main(int, char**) {
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
-    float scale = std::clamp(float(px_h) / 480.0f, 1.5f, 3.0f);
+    float scale = std::clamp(float(px_h) / 560.0f, 1.35f, 2.5f);
     ApplyMobileTheme(scale);
     LoadUiFont(io, scale);
 
