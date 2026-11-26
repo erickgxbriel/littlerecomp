@@ -126,6 +126,8 @@ void Pad(int, input::Pad& pad) {
     if (modern_pad && InVehicleActionMap()) ModernDriving(pad);
 }
 
+bool IsInVehicle() { return InVehicleActionMap(); }
+
 void Rumble(int, uint16_t&, uint16_t&) {}
 
 }  // namespace kbm

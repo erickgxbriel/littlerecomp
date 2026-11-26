@@ -21,4 +21,11 @@ input::Pad GetPad();
 // True if any touch input is currently active.
 bool IsActive();
 
+// Touch layout persistence & interactive on-screen editor.
+void LoadLayout();
+void SaveLayout();
+void ResetLayout();
+void SetEditing(bool editing);
+bool IsEditing();
+
 }  // namespace touch

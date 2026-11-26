@@ -461,23 +461,39 @@ bool Context::CreateSwapchain() {
         }
     }
 
-    if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+    int w = 1280, h = 720;
+    SDL_GetWindowSizeInPixels(window_, &w, &h);
+    logical_w_ = uint32_t(std::max(w, 1));
+    logical_h_ = uint32_t(std::max(h, 1));
+
+    const bool want_prerot = app::AndroidSettings().swapchain_prerotate;
+    auto rot_for_transform = [](VkSurfaceTransformFlagBitsKHR t) -> int {
+        if (t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR) return 1;
+        if (t == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR) return 2;
+        if (t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR) return 3;
+        return 0;
+    };
+
+    if (want_prerot &&
+        (caps.supportedTransforms & caps.currentTransform) &&
+        (caps.currentTransform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR ||
+         caps.currentTransform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
+         caps.currentTransform == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR ||
+         caps.currentTransform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) {
+        pre_transform_ = caps.currentTransform;
+    } else if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
         pre_transform_ = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     } else {
         pre_transform_ = caps.currentTransform;
     }
+    rot_mode_ = rot_for_transform(pre_transform_);
+    swapchain_prerotate_ = want_prerot;
 
-    int w = 1280, h = 720;
-    SDL_GetWindowSizeInPixels(window_, &w, &h);
-    if (pre_transform_ == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR && w > 0 && h > 0) {
-        extent_.width = std::clamp(uint32_t(w), caps.minImageExtent.width, caps.maxImageExtent.width);
-        extent_.height = std::clamp(uint32_t(h), caps.minImageExtent.height, caps.maxImageExtent.height);
-    } else if (caps.currentExtent.width != UINT32_MAX && caps.currentExtent.width > 0 && caps.currentExtent.height > 0) {
-        extent_ = caps.currentExtent;
-    } else {
-        extent_.width = std::clamp(uint32_t(w), caps.minImageExtent.width, caps.maxImageExtent.width);
-        extent_.height = std::clamp(uint32_t(h), caps.minImageExtent.height, caps.maxImageExtent.height);
-    }
+    const bool swap_wh = (rot_mode_ == 1 || rot_mode_ == 3);
+    const uint32_t phys_w = swap_wh ? logical_h_ : logical_w_;
+    const uint32_t phys_h = swap_wh ? logical_w_ : logical_h_;
+    extent_.width = std::clamp(phys_w, caps.minImageExtent.width, caps.maxImageExtent.width);
+    extent_.height = std::clamp(phys_h, caps.minImageExtent.height, caps.maxImageExtent.height);
     if (extent_.width == 0 || extent_.height == 0) return false;
 
     uint32_t image_count = std::max(caps.minImageCount + 1, 3u);
@@ -488,6 +504,25 @@ bool Context::CreateSwapchain() {
     VkCompositeAlphaFlagBitsKHR comp_alpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
     if (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
         comp_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    }
+
+    const bool want_vsync = app::Get().vsync;
+    uint32_t pm_count = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physical_, surface_, &pm_count, nullptr);
+    std::vector<VkPresentModeKHR> pms(pm_count);
+    if (pm_count > 0) {
+        vkGetPhysicalDeviceSurfacePresentModesKHR(physical_, surface_, &pm_count, pms.data());
+    }
+    auto has_pm = [&](VkPresentModeKHR m) {
+        return std::find(pms.begin(), pms.end(), m) != pms.end();
+    };
+    VkPresentModeKHR chosen_pm = VK_PRESENT_MODE_FIFO_KHR;
+    if (!want_vsync) {
+        if (has_pm(VK_PRESENT_MODE_MAILBOX_KHR)) {
+            chosen_pm = VK_PRESENT_MODE_MAILBOX_KHR;
+        } else if (has_pm(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+            chosen_pm = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
     }
 
     VkSwapchainCreateInfoKHR sci{};
@@ -502,8 +537,14 @@ bool Context::CreateSwapchain() {
     sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     sci.preTransform = pre_transform_;
     sci.compositeAlpha = comp_alpha;
-    sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    sci.presentMode = chosen_pm;
     sci.clipped = VK_TRUE;
+
+    swapchain_vsync_ = want_vsync;
+    present_mode_ = chosen_pm;
+    LOGR("vk: swapchain logical=%ux%u phys=%ux%u rot=%d (prerot=%d) presentMode=%d (vsync=%d)",
+         logical_w_, logical_h_, extent_.width, extent_.height, rot_mode_, int(want_prerot),
+         int(chosen_pm), int(want_vsync));
 
     if (vkCreateSwapchainKHR(device_, &sci, nullptr, &swapchain_) != VK_SUCCESS) {
         LOGE("vk: vkCreateSwapchainKHR failed");
@@ -538,6 +579,7 @@ bool Context::CreateSwapchain() {
     dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     dep.srcAccessMask = 0;
     dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
     VkRenderPassCreateInfo rpci{};
     rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -550,6 +592,10 @@ bool Context::CreateSwapchain() {
     if (vkCreateRenderPass(device_, &rpci, nullptr, &render_pass_) != VK_SUCCESS) {
         LOGE("vk: vkCreateRenderPass failed");
         return false;
+    }
+    color_att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    if (vkCreateRenderPass(device_, &rpci, nullptr, &render_pass_dont_care_) != VK_SUCCESS) {
+        render_pass_dont_care_ = VK_NULL_HANDLE;
     }
 
     image_views_.resize(count, VK_NULL_HANDLE);
@@ -594,6 +640,10 @@ void Context::DestroySwapchain() {
     for (VkImageView iv : image_views_)
         if (iv != VK_NULL_HANDLE) vkDestroyImageView(device_, iv, nullptr);
     image_views_.clear();
+    if (render_pass_dont_care_ != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device_, render_pass_dont_care_, nullptr);
+        render_pass_dont_care_ = VK_NULL_HANDLE;
+    }
     if (render_pass_ != VK_NULL_HANDLE) {
         vkDestroyRenderPass(device_, render_pass_, nullptr);
         render_pass_ = VK_NULL_HANDLE;
@@ -678,6 +728,10 @@ bool Context::Resume(SDL_Window* window) {
 
 bool Context::RenderFrame(const std::function<void()>& build_imgui, bool ui_active) {
     if (suspended_ || device_ == VK_NULL_HANDLE || swapchain_ == VK_NULL_HANDLE) return false;
+    if (app::Get().vsync != swapchain_vsync_ ||
+        app::AndroidSettings().swapchain_prerotate != swapchain_prerotate_) {
+        needs_recreate_ = true;
+    }
     if (needs_recreate_ && !RecreateSwapchain()) return false;
 
     // Wait briefly for a new guest frame unless UI/touch is active or periodic HUD refresh is due.
@@ -740,23 +794,55 @@ bool Context::RenderFrame(const std::function<void()>& build_imgui, bool ui_acti
     ImGui::Render();
     ImDrawData* draw_data = ImGui::GetDrawData();
 
+    if (draw_data && rot_mode_ != 0) {
+        const float lw = float(logical_w_);
+        const float lh = float(logical_h_);
+        auto xform = [&](float x, float y, float& ox, float& oy) {
+            if (rot_mode_ == 1) { ox = lh - y; oy = x; }
+            else if (rot_mode_ == 2) { ox = lw - x; oy = lh - y; }
+            else { ox = y; oy = lw - x; }
+        };
+        for (int n = 0; n < draw_data->CmdListsCount; ++n) {
+            ImDrawList* cl = draw_data->CmdLists[n];
+            for (int vi = 0; vi < cl->VtxBuffer.Size; ++vi) {
+                float ox = 0.0f, oy = 0.0f;
+                xform(cl->VtxBuffer[vi].pos.x, cl->VtxBuffer[vi].pos.y, ox, oy);
+                cl->VtxBuffer[vi].pos.x = ox;
+                cl->VtxBuffer[vi].pos.y = oy;
+            }
+            for (int ci = 0; ci < cl->CmdBuffer.Size; ++ci) {
+                ImDrawCmd& cmd = cl->CmdBuffer[ci];
+                if (cmd.UserCallback) continue;
+                float ax = 0.0f, ay = 0.0f, bx = 0.0f, by = 0.0f;
+                xform(cmd.ClipRect.x, cmd.ClipRect.y, ax, ay);
+                xform(cmd.ClipRect.z, cmd.ClipRect.w, bx, by);
+                cmd.ClipRect = ImVec4(std::min(ax, bx), std::min(ay, by), std::max(ax, bx), std::max(ay, by));
+            }
+        }
+        draw_data->DisplaySize = ImVec2(float(extent_.width), float(extent_.height));
+    }
+
     VkCommandBufferBeginInfo cbbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(f.cmd, &cbbi);
 
+    const bool full_cover = (snap_slot >= 0 && snap.view != VK_NULL_HANDLE &&
+                             app::AndroidSettings().aspect_mode == 1 && render_pass_dont_care_ != VK_NULL_HANDLE);
     VkClearValue clear{};
     clear.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
     VkRenderPassBeginInfo rpbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rpbi.renderPass = render_pass_;
+    rpbi.renderPass = full_cover ? render_pass_dont_care_ : render_pass_;
     rpbi.framebuffer = framebuffers_[img_idx];
     rpbi.renderArea.extent = extent_;
-    rpbi.clearValueCount = 1;
-    rpbi.pClearValues = &clear;
+    rpbi.clearValueCount = full_cover ? 0u : 1u;
+    rpbi.pClearValues = full_cover ? nullptr : &clear;
     vkCmdBeginRenderPass(f.cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
     if (snap_slot >= 0 && snap.view != VK_NULL_HANDLE) {
+        const auto& ex = app::AndroidSettings();
         upscaler_.Draw(f.cmd, frame_idx_, snap.view, snap.gamma_view, snap.width, snap.height,
-                       snap.gamma_enabled, extent_, app::Widescreen(), app::AndroidSettings().upscaler);
+                       snap.gamma_enabled, logical_w_, logical_h_, extent_, rot_mode_,
+                       app::Widescreen(), ex.aspect_mode, ex.upscaler);
     }
     if (draw_data) ImGui_ImplVulkan_RenderDrawData(draw_data, f.cmd);
 
@@ -792,7 +878,7 @@ bool Context::RenderFrame(const std::function<void()>& build_imgui, bool ui_acti
     if (pres == VK_ERROR_SURFACE_LOST_KHR) {
         Suspend();
         Resume(window_);
-    } else if (pres == VK_ERROR_OUT_OF_DATE_KHR) {
+    } else if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
         needs_recreate_ = true;
     }
 

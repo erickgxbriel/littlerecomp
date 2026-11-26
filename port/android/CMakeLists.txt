@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(SCARFACE_BUILD_ANDROID_APP "Build Android APK shared libraries (libSDL3.so, libmain.so)" OFF)
+option(SCARFACE_RELEASE_OPT "Enable -O3 and ThinLTO optimizations for release builds" OFF)
 
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 set(XBE_SDK_DIR "${REPO_ROOT}/sdk")
@@ -231,7 +232,8 @@ if(SCARFACE_BUILD_ANDROID_APP AND ANDROID)
     )
     target_compile_definitions(main PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
     target_compile_options(main PRIVATE
-        -O2
+        $<IF:$<BOOL:${SCARFACE_RELEASE_OPT}>,-O3,-O2>
+        $<$<BOOL:${SCARFACE_RELEASE_OPT}>:-DNDEBUG>
         -fno-strict-aliasing
         -fexceptions
         -frtti

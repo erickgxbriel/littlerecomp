@@ -38,6 +38,15 @@ if [ ! -f "$SHADERC_LIB" ]; then
         libshaderc_combined -j"$(nproc)"
 fi
 
+WANT_OPT="OFF"
+if [ "$BUILD_TYPE" = "release" ]; then
+    WANT_OPT="ON"
+fi
+if ! grep -q "SCARFACE_RELEASE_OPT:BOOL=$WANT_OPT" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
+    echo "=== Reconfiguring CMake (SCARFACE_RELEASE_OPT=$WANT_OPT) ==="
+    cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" -DSCARFACE_BUILD_ANDROID_APP=ON -DSCARFACE_RELEASE_OPT="$WANT_OPT"
+fi
+
 echo "=== Building native ARM64 libraries ($BUILD_TYPE: Scarface_code, SDL3-shared, main) ==="
 cmake --build "$BUILD_DIR" --target Scarface_code SDL3-shared main -j"$(nproc)"
 
@@ -128,7 +137,7 @@ if [ "$BUILD_TYPE" = "release" ]; then
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=LittleRecomp,O=OpenSource,C=BR"
     fi
-    OUT_APK="$BUILD_DIR/LittleRecomp-v0.1.0-beta-release.apk"
+    OUT_APK="$BUILD_DIR/LittleRecomp-v0.2.0-beta-release.apk"
 else
     KEYSTORE="$TOOLS_DIR/debug.keystore"
     KEY_ALIAS="androiddebugkey"

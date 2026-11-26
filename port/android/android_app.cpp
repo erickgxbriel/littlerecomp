@@ -19,9 +19,12 @@
 #include "android_adpf.h"
 #include "audio/oboe_control.h"
 #include "common/kbm.h"
+#include "core/input.h"
 #include "core/log.h"
 #include "cpu_affinity.h"
 #include "i18n.h"
+#include "touch_controls.h"
+#include "vk_context.h"
 
 namespace fs = std::filesystem;
 
@@ -121,6 +124,13 @@ void EnableTouchDragScroll() {
 AndroidExtras& AndroidSettings() {
     static AndroidExtras extras;
     return extras;
+}
+
+bool EffectiveTouchEnabled() {
+    const AndroidExtras& ex = AndroidSettings();
+    if (!ex.touch_controls) return false;
+    if (ex.auto_hide_touch_with_pad && GetStatus().has_physical_pad) return false;
+    return true;
 }
 
 void SetStorageDir(const fs::path& dir) {
@@ -255,13 +265,19 @@ void Load() {
 
     ex.touch_controls = t["android_touch_controls"].value_or(ex.touch_controls);
     ex.touch_opacity = static_cast<float>(t["android_touch_opacity"].value_or(double(ex.touch_opacity)));
-    ex.render_scale = std::clamp(static_cast<float>(t["android_render_scale"].value_or(double(ex.render_scale))), 1.0f, 2.0f);
+    ex.render_scale = std::clamp(static_cast<float>(t["android_render_scale"].value_or(double(ex.render_scale))), 0.60f, 2.25f);
     ex.upscaler = std::clamp(int(t["android_upscaler"].value_or(int64_t(ex.upscaler))), 0, 2);
+    ex.aspect_mode = std::clamp(int(t["android_aspect_mode"].value_or(int64_t(ex.aspect_mode))), 0, 1);
     ex.pin_big_cores = t["android_pin_big_cores"].value_or(ex.pin_big_cores);
     ex.hud_mode = std::clamp(int(t["android_hud_mode"].value_or(int64_t(s.show_fps ? 2 : ex.hud_mode))), 0, 3);
     ex.language = std::clamp(int(t["android_language"].value_or(int64_t(ex.language))), 0, 2);
     ex.native_aux_rt = t["android_native_aux_rt"].value_or(ex.native_aux_rt);
     ex.thermal_drs = t["android_thermal_drs"].value_or(ex.thermal_drs);
+    ex.touch_auto_aim_fire = t["android_touch_auto_aim_fire"].value_or(ex.touch_auto_aim_fire);
+    ex.swapchain_prerotate = t["android_prerotate"].value_or(ex.swapchain_prerotate);
+    ex.low_vram_tex = t["android_low_vram_tex"].value_or(ex.low_vram_tex);
+    ex.controller_rumble = t["android_rumble"].value_or(ex.controller_rumble);
+    ex.auto_hide_touch_with_pad = t["android_auto_hide_touch"].value_or(ex.auto_hide_touch_with_pad);
     ex.game_uri = t["android_game_uri"].value_or(ex.game_uri);
     ex.game_display_name = t["android_game_display_name"].value_or(ex.game_display_name);
 
@@ -290,11 +306,17 @@ void Save() {
                   {"android_touch_opacity", double(ex.touch_opacity)},
                   {"android_render_scale", double(ex.render_scale)},
                   {"android_upscaler", int64_t(ex.upscaler)},
+                  {"android_aspect_mode", int64_t(ex.aspect_mode)},
                   {"android_pin_big_cores", ex.pin_big_cores},
                   {"android_hud_mode", int64_t(ex.hud_mode)},
                   {"android_language", int64_t(ex.language)},
                   {"android_native_aux_rt", ex.native_aux_rt},
                   {"android_thermal_drs", ex.thermal_drs},
+                  {"android_touch_auto_aim_fire", ex.touch_auto_aim_fire},
+                  {"android_prerotate", ex.swapchain_prerotate},
+                  {"android_low_vram_tex", ex.low_vram_tex},
+                  {"android_rumble", ex.controller_rumble},
+                  {"android_auto_hide_touch", ex.auto_hide_touch_with_pad},
                   {"android_game_uri", ex.game_uri},
                   {"android_game_display_name", ex.game_display_name}};
     for (const Option& o : kGame.options) {
@@ -591,6 +613,16 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
                     EnableTouchDragScroll();
                     ImGui::Text("%s:", i18n::T(i18n::Str::LblScale));
                     ImGui::SameLine();
+                    if (ImGui::RadioButton("0.6x", std::fabs(ex.render_scale - 0.60f) < 0.08f)) {
+                        ex.render_scale = 0.60f;
+                        Save();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton("0.75x", std::fabs(ex.render_scale - 0.75f) < 0.08f)) {
+                        ex.render_scale = 0.75f;
+                        Save();
+                    }
+                    ImGui::SameLine();
                     if (ImGui::RadioButton(i18n::T(i18n::Str::LblScale10), std::fabs(ex.render_scale - 1.0f) < 0.1f)) {
                         ex.render_scale = 1.0f;
                         Save();
@@ -605,6 +637,11 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
                         ex.render_scale = 2.0f;
                         Save();
                     }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::LblScale225), std::fabs(ex.render_scale - 2.25f) < 0.1f)) {
+                        ex.render_scale = 2.25f;
+                        Save();
+                    }
 
                     ImGui::Text("%s:", i18n::T(i18n::Str::LblUpscaler));
                     ImGui::SameLine();
@@ -613,6 +650,54 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
                     if (ImGui::RadioButton("FSR 1.0", ex.upscaler == 2)) { ex.upscaler = 2; Save(); }
                     ImGui::SameLine();
                     if (ImGui::RadioButton("Bilinear", ex.upscaler == 0)) { ex.upscaler = 0; Save(); }
+
+                    ImGui::Text("%s:", i18n::T(i18n::Str::LblAspect));
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::Aspect16x9), ex.aspect_mode == 0)) {
+                        ex.aspect_mode = 0;
+                        Save();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::AspectFullscreen), ex.aspect_mode == 1)) {
+                        ex.aspect_mode = 1;
+                        Save();
+                    }
+                    ImGui::SameLine(0.0f, 20.0f);
+                    if (ImGui::Checkbox(i18n::T(i18n::Str::LblVsync), &s.vsync)) {
+                        Save();
+                    }
+                    ImGui::SameLine(0.0f, 20.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.14f, 0.19f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.86f, 0.20f, 0.25f, 1.0f));
+                    if (ImGui::Button(i18n::T(i18n::Str::BtnLowEndPreset))) {
+                        ex.render_scale = 0.75f;
+                        ex.upscaler = 1;
+                        s.aniso = 0;
+                        ex.native_aux_rt = true;
+                        ex.thermal_drs = true;
+                        ex.low_vram_tex = true;
+                        s.experimental_60fps = false;
+                        Save();
+                    }
+                    ImGui::PopStyleColor(2);
+
+                    const float max_aniso = vk::ActiveContext() ? vk::ActiveContext()->MaxAnisotropy() : 16.0f;
+                    ImGui::Text("%s:", i18n::T(i18n::Str::LblAniso));
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::AnisoOff), s.aniso <= 1)) {
+                        s.aniso = 0;
+                        Save();
+                    }
+                    for (uint32_t lvl : {2u, 4u, 8u, 16u}) {
+                        if (float(lvl) > max_aniso + 0.1f) break;
+                        ImGui::SameLine();
+                        char lbl[16];
+                        std::snprintf(lbl, sizeof(lbl), "%ux", lvl);
+                        if (ImGui::RadioButton(lbl, s.aniso == lvl)) {
+                            s.aniso = lvl;
+                            Save();
+                        }
+                    }
 
                     ImGui::Separator();
                     if (ImGui::BeginTable("##GfxToggles", 2, ImGuiTableFlags_SizingStretchSame)) {
@@ -633,6 +718,13 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
                         ImGui::TableSetColumnIndex(1);
                         if (ImGui::Checkbox(i18n::T(i18n::Str::LblThermalDrs), &ex.thermal_drs)) Save();
                         ImGui::TextDisabled("  %s", i18n::T(i18n::Str::LblThermalDrsHint));
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        if (ImGui::Checkbox(i18n::T(i18n::Str::LblPreRotate), &ex.swapchain_prerotate)) Save();
+                        ImGui::TableSetColumnIndex(1);
+                        if (ImGui::Checkbox(i18n::T(i18n::Str::LblLowVramTex), &ex.low_vram_tex)) Save();
+                        ImGui::TextDisabled("  %s", i18n::T(i18n::Str::LblLowVramTexHint));
                         ImGui::EndTable();
                     }
 
@@ -671,8 +763,28 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
                 if (ImGui::BeginChild("##TabBody", ImVec2(0, -footer_h), false)) {
                     EnableTouchDragScroll();
                     if (ImGui::Checkbox(i18n::T(i18n::Str::LblTouchControls), &ex.touch_controls)) Save();
+                    if (ImGui::Checkbox(i18n::T(i18n::Str::LblAutoHideTouch), &ex.auto_hide_touch_with_pad)) Save();
                     if (ImGui::SliderFloat(i18n::T(i18n::Str::LblTouchOpacity), &ex.touch_opacity, 0.15f, 0.90f, "%.2f")) Save();
+                    if (ImGui::Checkbox(i18n::T(i18n::Str::LblAutoAimFire), &ex.touch_auto_aim_fire)) Save();
+                    ImGui::TextDisabled("  %s", i18n::T(i18n::Str::LblAutoAimFireHint));
                     if (ImGui::Checkbox(i18n::T(i18n::Str::LblModernPad), &kbm::modern_pad)) Save();
+                    if (ImGui::Checkbox(i18n::T(i18n::Str::LblControllerRumble), &ex.controller_rumble)) {
+                        if (!ex.controller_rumble) input::Rumble(0, 0, 0);
+                        Save();
+                    }
+                    ImGui::Separator();
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.14f, 0.19f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.86f, 0.20f, 0.25f, 1.0f));
+                    if (ImGui::Button(i18n::T(i18n::Str::BtnEditTouchLayout))) {
+                        Save();
+                        ToggleOverlay();
+                        touch::SetEditing(true);
+                    }
+                    ImGui::PopStyleColor(2);
+                    ImGui::SameLine();
+                    if (ImGui::Button(i18n::T(i18n::Str::BtnResetTouchLayout))) {
+                        touch::ResetLayout();
+                    }
                     ImGui::Separator();
                     ImGui::Text("%s %s", i18n::T(i18n::Str::LblPhysicalGamepad),
                                 st.has_physical_pad ? i18n::T(i18n::Str::GamepadConnected)

@@ -73,6 +73,7 @@ struct File : Object {
     const Disc::Entry* entry = nullptr;  // on the disc image instead of a host path
     bool dir = false;
     uint64_t pos = 0;
+    uint64_t fp_pos = UINT64_MAX;
     std::vector<fs::directory_entry> entries;
     std::vector<const Disc::Entry*> disc_entries;
     size_t next = 0;
@@ -419,10 +420,12 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
         IoStatus(iosb, kAccessDenied, 0);
         return kAccessDenied;
     }
+    std::setvbuf(fp, nullptr, _IOFBF, 64 * 1024);
     auto f = std::make_shared<File>();
     f->host = host;
     f->xbox = Normalize(name);
     f->fp = fp;
+    f->fp_pos = 0;
     f->delete_on_close = options & 0x1000;  // FILE_DELETE_ON_CLOSE
     W32(handle_out, NewHandle(f));
     IoStatus(iosb, kSuccess, info);
@@ -452,6 +455,8 @@ KERNEL_EXPORT(202, NtOpenFile, 6) {
         f->fp = std::fopen(host.c_str(), "r+b");
         if (!f->fp) f->fp = std::fopen(host.c_str(), "rb");
         if (!f->fp) return kAccessDenied;
+        std::setvbuf(f->fp, nullptr, _IOFBF, 64 * 1024);
+        f->fp_pos = 0;
     }
     (void)options;
     W32(handle_out, NewHandle(f));
@@ -482,8 +487,9 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
     ResetEvent(*f);
     std::lock_guard<std::mutex> lock(f->io);
     uint64_t pos = Offset(*f, off);
-    if (f->fp) Seek(f->fp, pos);
+    if (f->fp && (write || f->fp_pos != pos)) Seek(f->fp, pos);
     uint32_t n = 0;
+    bool short_io = false;
     while (n < len) {
         uint32_t at = pages ? R32(pages + n / 0x1000 * 8) + n % 0x1000 : buf + n;
         uint32_t chunk = pages ? std::min(len - n, 0x1000 - n % 0x1000) : len;
@@ -491,9 +497,13 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
                       : write  ? std::fwrite(HostPtr(at), 1, chunk, f->fp)
                                : std::fread(HostPtr(at), 1, chunk, f->fp);
         n += uint32_t(done);
-        if (done < chunk) break;
+        if (done < chunk) {
+            short_io = true;
+            break;
+        }
     }
     f->pos = pos + n;
+    if (f->fp) f->fp_pos = (!short_io && !write) ? (pos + n) : (write ? (pos + n) : UINT64_MAX);
     if (write && n < len) return Finish(*f, 0xC000007F, n, event, apc, apc_ctx, iosb);  // disk full
     if (!write && len && !n) return Finish(*f, kEndOfFile, 0, event, apc, apc_ctx, iosb);
     return Finish(*f, kSuccess, n, event, apc, apc_ctx, iosb);

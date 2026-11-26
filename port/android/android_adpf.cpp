@@ -302,8 +302,15 @@ float ComputeEffectiveScale(float requested_scale, bool drs_enabled, int thermal
     }
 
     if (s_tier == 0) return requested_scale;
-    if (s_tier == 1) return (requested_scale > 1.6f) ? 1.5f : 1.0f;
-    return 1.0f;
+    if (s_tier == 1) {
+        if (requested_scale > 1.6f) return 1.5f;
+        if (requested_scale > 1.1f) return 1.0f;
+        if (requested_scale > 0.8f) return 0.75f;
+        return 0.60f;
+    }
+    if (requested_scale > 1.1f) return 1.0f;
+    if (requested_scale > 0.78f) return 0.75f;
+    return 0.60f;
 }
 
 }  // namespace adpf

@@ -111,6 +111,7 @@ struct Tex {
     uint64_t frame = 0;
     uint64_t palette = 0;
     size_t vram_bytes = 0;
+    uint8_t mip_skip = 0;
     bool linear_ok = true;
 };
 
@@ -773,6 +774,7 @@ private:
     uint32_t guest_w_ = 640, guest_h_ = 480;
     float scale_ = 1.5f;
     bool native_aux_rt_ = true;
+    bool low_vram_tex_ = false;
     int last_thermal_status_ = 0;
     std::chrono::steady_clock::time_point last_present_tp_ = std::chrono::steady_clock::now();
     bool stall_logged_ = false;
@@ -1181,6 +1183,7 @@ bool VulkanBackend::Init(uint32_t width, uint32_t height) {
     guest_h_ = height;
     scale_ = app::RenderScale(height);
     native_aux_rt_ = app::AndroidSettings().native_aux_rt;
+    low_vram_tex_ = app::AndroidSettings().low_vram_tex;
     adpf::RegisterRenderThread(gettid());
 
     // Probe linear filtering capability for R32F and chosen depth format
@@ -1437,6 +1440,7 @@ VkRenderPass VulkanBackend::GetRenderPass(const RpKey& k) {
                             VK_ACCESS_TRANSFER_WRITE_BIT;
     deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    deps[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
     deps[1].srcSubpass = 0;
     deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
@@ -1444,6 +1448,7 @@ VkRenderPass VulkanBackend::GetRenderPass(const RpKey& k) {
     deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
     deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    deps[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
     VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
     rpci.attachmentCount = att_count;
@@ -1634,7 +1639,7 @@ void VulkanBackend::ReleaseTarget(Target& t) {
 
 bool VulkanBackend::CreateTargetResources(Target& t) {
     const bool is_aux = native_aux_rt_ && (t.gw < guest_w_ || t.gh < guest_h_);
-    const float eff_scale = is_aux ? 1.0f : scale_;
+    const float eff_scale = is_aux ? std::min(1.0f, scale_) : scale_;
     t.w = std::max(1u, uint32_t(std::lround(t.gw * eff_scale)));
     t.h = std::max(1u, uint32_t(std::lround(t.gh * eff_scale)));
     if (t.depth) {
@@ -1883,8 +1888,13 @@ bool VulkanBackend::CreateTexture(Tex& tx, const TextureDesc& d, const FormatInf
 
     tx = Tex{};
     tx.d = d;
-    tx.levels = d.levels;
-    uint32_t w = d.width, h = d.height;
+    uint32_t skip = 0;
+    if (low_vram_tex_ && !d.linear && !d.cube && d.depth == 1 && d.levels >= 3 && d.width >= 128 && d.height >= 128) {
+        skip = 1u;
+    }
+    tx.mip_skip = uint8_t(skip);
+    tx.levels = d.levels - skip;
+    uint32_t w = std::max(1u, d.width >> skip), h = std::max(1u, d.height >> skip);
     bool hw_bc = fi.compressed && ctx_->HasBC();
 
     if (hw_bc) {
@@ -1955,7 +1965,7 @@ void VulkanBackend::UploadTexture(Tex& tx, const TextureDesc& d, const FormatInf
                        tx.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     struct MipPlan {
-        uint32_t f, l, lw, lh, lz;
+        uint32_t f, l, gl, lw, lh, lz;
         size_t off, bytes;
     };
     std::vector<MipPlan> plans;
@@ -1966,13 +1976,14 @@ void VulkanBackend::UploadTexture(Tex& tx, const TextureDesc& d, const FormatInf
     size_t total_staging = 0;
     for (uint32_t f = 0; f < faces; ++f) {
         for (uint32_t l = 0; l < tx.levels; ++l) {
-            uint32_t lw = d.linear ? d.width : std::max(d.width >> l, 1u);
-            uint32_t lh = d.linear ? d.height : std::max(d.height >> l, 1u);
-            uint32_t lz = d.linear ? 1u : std::max(d.depth >> l, 1u);
-            size_t mip_bytes = hw_bc ? LevelSize(d, l) : size_t(lw) * lh * lz * 4u;
+            uint32_t gl = l + tx.mip_skip;
+            uint32_t lw = d.linear ? d.width : std::max(d.width >> gl, 1u);
+            uint32_t lh = d.linear ? d.height : std::max(d.height >> gl, 1u);
+            uint32_t lz = d.linear ? 1u : std::max(d.depth >> gl, 1u);
+            size_t mip_bytes = hw_bc ? LevelSize(d, gl) : size_t(lw) * lh * lz * 4u;
             size_t off = (total_staging + 15u) & ~size_t(15u);
             total_staging = off + mip_bytes;
-            plans.push_back({f, l, lw, lh, lz, off, mip_bytes});
+            plans.push_back({f, l, gl, lw, lh, lz, off, mip_bytes});
             VkBufferImageCopy c{};
             c.bufferOffset = off;
             c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, f, 1};
@@ -2004,7 +2015,7 @@ void VulkanBackend::UploadTexture(Tex& tx, const TextureDesc& d, const FormatInf
             for (const MipPlan& m : plans) {
                 uint8_t* dst = dst_base + m.off;
                 if (fi.compressed) {
-                    const uint8_t* src_lvl = guest_src + (d.cube ? m.f * FaceSize(d) : 0u) + LevelOffset(d, m.l);
+                    const uint8_t* src_lvl = guest_src + (d.cube ? m.f * FaceSize(d) : 0u) + LevelOffset(d, m.gl);
                     if (hw_bc) {
                         std::memcpy(dst, src_lvl, m.bytes);
                     } else {
@@ -2021,7 +2032,7 @@ void VulkanBackend::UploadTexture(Tex& tx, const TextureDesc& d, const FormatInf
                     }
                 } else {
                     uint32_t pitch = 0;
-                    DecodeLevel(d, m.l, m.f, guest_src, palette, tex_tmp_, pitch);
+                    DecodeLevel(d, m.gl, m.f, guest_src, palette, tex_tmp_, pitch);
                     if (fi.host == Host::BGRA8) {
                         if (pitch == m.lw * 4u) {
                             vk_tex::ConvertBGRA8ToRGBA8(tex_tmp_.data(), dst, m.lw * m.lh * m.lz);
@@ -2201,10 +2212,12 @@ VkSampler VulkanBackend::GetStageSampler(const State& s, int i, const DrawTextur
     sd.magFilter = lin(mag) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     sd.mipmapMode = (lin_ok && mip == 2u) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
 
-    bool aniso = (min == 3u || mag == 3u) || (app::Get().aniso > 1 && lin(min) && mip && !stages.info[i].shadow);
+    const uint32_t user_aniso = app::Get().aniso;
+    bool aniso = (min == 3u || mag == 3u) || (user_aniso > 1u && lin(min) && mip && !stages.info[i].shadow);
     if (ctx_->HasAnisotropy() && aniso && lin_ok && !stages.info[i].shadow) {
-        uint32_t want = (min == 3u || mag == 3u) ? std::max<uint32_t>(t[kTssMaxAnisotropy], 1u) : app::Get().aniso;
-        sd.anisotropyEnable = want > 1 ? VK_TRUE : VK_FALSE;
+        uint32_t game_want = (min == 3u || mag == 3u) ? std::max<uint32_t>(t[kTssMaxAnisotropy], 1u) : 1u;
+        uint32_t want = std::max(game_want, user_aniso);
+        sd.anisotropyEnable = want > 1u ? VK_TRUE : VK_FALSE;
         sd.maxAnisotropy = std::min(float(want), ctx_->MaxAnisotropy());
     }
 
@@ -2680,7 +2693,7 @@ void VulkanBackend::UploadConstants(const State& s, const DrawShaders& sh, const
     c.surf[0] = float(gw);
     c.surf[1] = float(gh);
     c.surf[2] = 1.0f / s.zscale;
-    if ((k.topo & 0xFu) == uint32_t(Topology::Points)) c.surf[3] = cur_draw_rt_ ? float(cur_draw_rt_->w) / cur_draw_rt_->gw : scale_;
+    if ((k.topo & 0xFu) == uint32_t(Topology::Points)) c.surf[3] = std::max(1.0f, cur_draw_rt_ ? float(cur_draw_rt_->w) / cur_draw_rt_->gw : scale_);
     Color(s.rs[kRsFogColor], c.fog_color);
     c.misc[0] = float(SimpleState(s, kMAlphaRef) & 0xFFu);
     c.misc[1] = SimpleState(s, kMAlphaTestEnable) ? float(CmpOp(SimpleState(s, kMAlphaFunc))) : 7.0f;
@@ -3497,6 +3510,25 @@ void VulkanBackend::ApplySettings() {
         CollectGarbage(CurFrame());
         scale_ = want;
         native_aux_rt_ = want_aux;
+    }
+
+    const bool want_low_vram = ex.low_vram_tex;
+    if (want_low_vram != low_vram_tex_) {
+        LOGR("vk_backend: switching low_vram_tex %d -> %d (clearing texture cache)", int(low_vram_tex_), int(want_low_vram));
+        Flush();
+        ctx_->WaitIdle();
+        for (auto& [tk, tx] : textures_) {
+            if (tx.view) vkDestroyImageView(dev_, tx.view, nullptr);
+            if (tx.image) vkDestroyImage(dev_, tx.image, nullptr);
+            if (tx.mem) vkFreeMemory(dev_, tx.mem, nullptr);
+        }
+        textures_.clear();
+        tex_vram_bytes_ = 0;
+        tex_desc_cache_.clear();
+        vkResetDescriptorPool(dev_, tex_desc_pool_, 0);
+        bound_tex_set_ = VK_NULL_HANDLE;
+        for (Frame& fr : frames_) CollectGarbage(fr);
+        low_vram_tex_ = want_low_vram;
     }
 }
 

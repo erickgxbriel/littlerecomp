@@ -24,8 +24,8 @@ public:
     void Shutdown();
 
     void Draw(VkCommandBuffer cmd, uint32_t frame_idx, VkImageView src_view, VkImageView gamma_lut_view,
-              uint32_t src_w, uint32_t src_h, bool gamma_enabled, VkExtent2D swap_extent,
-              bool widescreen, int mode);
+              uint32_t src_w, uint32_t src_h, bool gamma_enabled, uint32_t logical_w, uint32_t logical_h,
+              VkExtent2D swap_extent, int rot_mode, bool widescreen, int aspect_mode, int mode);
 
     bool Ready() const { return ready_; }
 

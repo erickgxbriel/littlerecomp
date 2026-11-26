@@ -389,7 +389,7 @@ void LaunchGameBootAsync() {
         }
 
         app::SetStatusStage(i18n::T(i18n::Str::StatusRunningBeta), false, true);
-        LOGR("boot: Scarface guest running cleanly on ARM64 (v0.1.0-beta)");
+        LOGR("boot: Scarface guest running cleanly on ARM64 (v0.2.0-beta)");
         g_boot_in_flight.store(false);
     }).detach();
 }
@@ -471,11 +471,12 @@ int main(int, char**) {
     app::SetStorageDir(storage);
 
     logx::Init((app::ExeDir() / "logs").string(), app::kGame.log);
-    LOGR("LittleRecomp v0.1.0-beta starting, storage=%s", app::ExeDir().string().c_str());
+    LOGR("LittleRecomp v0.2.0-beta starting, storage=%s", app::ExeDir().string().c_str());
 
     adpf::Init();
     cpu_affinity::Init();
     app::Load();
+    touch::LoadLayout();
     i18n::SetLanguage(static_cast<i18n::Lang>(app::AndroidSettings().language), app::GetSystemLanguageCode());
     if (app::kGame.init) app::kGame.init();
 
@@ -562,19 +563,31 @@ int main(int, char**) {
             }
             if (e.type == SDL_EVENT_GAMEPAD_ADDED) {
                 input::OnGamepadAdded(e.gdevice.which);
+                if (app::AndroidSettings().auto_hide_touch_with_pad) {
+                    touch::Clear();
+                }
             } else if (e.type == SDL_EVENT_GAMEPAD_REMOVED) {
                 input::OnGamepadRemoved(e.gdevice.which);
             } else if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                        (e.key.key == SDLK_AC_BACK || e.key.key == SDLK_ESCAPE)) {
-                app::ToggleOverlay();
+                if (touch::IsEditing()) {
+                    touch::SaveLayout();
+                    touch::SetEditing(false);
+                } else {
+                    app::ToggleOverlay();
+                }
                 touch::Clear();
                 continue;
             }
 
             if (app::OverlayOpen() || !app::GetStatus().game_booted) {
                 ImGui_ImplSDL3_ProcessEvent(&e);
+            } else if (touch::IsEditing()) {
+                ImGui_ImplSDL3_ProcessEvent(&e);
+                touch::HandleEvent(e, float(vk.Width()), float(vk.Height()),
+                                   app::OverlayOpen(), app::EffectiveTouchEnabled());
             } else if (!touch::HandleEvent(e, float(vk.Width()), float(vk.Height()),
-                                           app::OverlayOpen(), app::AndroidSettings().touch_controls)) {
+                                           app::OverlayOpen(), app::EffectiveTouchEnabled())) {
                 ImGui_ImplSDL3_ProcessEvent(&e);
             }
         }
@@ -594,7 +607,7 @@ int main(int, char**) {
             LaunchGameBootAsync();
         }
 
-        const bool ui_active = app::OverlayOpen() || !app::GetStatus().game_booted || touch::IsActive() || had_ui_event;
+        const bool ui_active = app::OverlayOpen() || !app::GetStatus().game_booted || touch::IsActive() || touch::IsEditing() || had_ui_event;
         vk.RenderFrame([&] {
             ImGui_ImplSDL3_NewFrame();
             ImGui::NewFrame();
@@ -602,7 +615,7 @@ int main(int, char**) {
             const auto& ex = app::AndroidSettings();
             if (app::GetStatus().game_booted) {
                 touch::DrawOverlay(float(vk.Width()), float(vk.Height()), ex.touch_opacity,
-                                   ex.touch_controls, app::OverlayOpen());
+                                   app::EffectiveTouchEnabled(), app::OverlayOpen());
             }
             app::DrawAndroidOverlay(float(vk.Width()), float(vk.Height()), ImGui::GetIO().Framerate);
         }, ui_active);

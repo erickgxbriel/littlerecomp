@@ -7,6 +7,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#ifndef _WIN32
+#include <array>
+#include <mutex>
+#endif
 
 namespace kernel {
 
@@ -48,6 +52,19 @@ private:
     uint64_t base_ = 0;  // the game partition
     uint64_t time_ = 0;
     Entry root_;
+#ifndef _WIN32
+    static constexpr uint32_t kCacheBlockSize = 64 * 1024;
+    static constexpr size_t kCacheSlots = 8;
+    struct CacheSlot {
+        uint64_t base = UINT64_MAX;
+        uint32_t valid = 0;
+        uint64_t stamp = 0;
+        std::vector<uint8_t> buf;
+    };
+    mutable std::mutex cache_mutex_;
+    mutable uint64_t cache_stamp_ = 0;
+    mutable std::array<CacheSlot, kCacheSlots> cache_{};
+#endif
 };
 
 // D: from a disc image instead of a folder, set before Boot

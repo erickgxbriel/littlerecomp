@@ -57,8 +57,8 @@ public:
 
     uint32_t FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred = 0) const;
 
-    uint32_t Width() const { return extent_.width; }
-    uint32_t Height() const { return extent_.height; }
+    uint32_t Width() const { return logical_w_; }
+    uint32_t Height() const { return logical_h_; }
     const std::string& GpuName() const { return gpu_name_; }
     const std::string& VulkanVersion() const { return vk_version_; }
 
@@ -130,7 +130,12 @@ private:
     std::vector<VkImage> images_;
     std::vector<VkImageView> image_views_;
     VkRenderPass render_pass_ = VK_NULL_HANDLE;
+    VkRenderPass render_pass_dont_care_ = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> framebuffers_;
+    uint32_t logical_w_ = 1280;
+    uint32_t logical_h_ = 720;
+    int rot_mode_ = 0;
+    bool swapchain_prerotate_ = true;
 
     VkCommandPool cmd_pool_ = VK_NULL_HANDLE;
     struct Frame {
@@ -156,6 +161,8 @@ private:
     bool imgui_initialized_ = false;
     bool suspended_ = false;
     bool needs_recreate_ = false;
+    bool swapchain_vsync_ = true;
+    VkPresentModeKHR present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
 
     std::string gpu_name_;
     std::string vk_version_;

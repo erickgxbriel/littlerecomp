@@ -54,7 +54,7 @@ constexpr Entry kTable[int(Str::Count)] = {
      "Aguardando sua imagem do jogo Xbox Original (.iso / .xiso) ou pasta"},
     {"Loading XBE/ISO...", "Carregando XBE/ISO..."},
     {"Booting guest image...", "Iniciando jogo..."},
-    {"Running (Beta v0.1.0)", "Rodando (Beta v0.1.0)"},
+    {"Running (Beta v0.2.0)", "Rodando (Beta v0.2.0)"},
     {"This file cannot be streamed (e.g. cloud Drive). Save the .iso/.xiso to local device storage first.",
      "Este arquivo não permite leitura direta (ex.: nuvem/Drive). Salve o .iso/.xiso na memória local do aparelho."},
     {"Not a valid Original Xbox .iso/.xiso image (PS2/PC ISOs are not supported).",
@@ -88,13 +88,24 @@ constexpr Entry kTable[int(Str::Count)] = {
     {"1.0x (480p)", "1.0x (480p)"},
     {"1.5x (720p)", "1.5x (720p)"},
     {"2.0x (960p)", "2.0x (960p)"},
+    {"2.25x (1080p)", "2.25x (1080p)"},
     {"Upscaler", "Upscaler"},
+    {"Aspect", "Proporção"},
+    {"16:9", "16:9"},
+    {"Fullscreen", "Tela Cheia"},
+    {"VSync", "VSync"},
+    {"Anisotropic", "Anisotrópico"},
+    {"Off", "Desl."},
     {"Experimental: 60 FPS Mode", "Experimental: Modo 60 FPS"},
     {"Native Aux Effects (1.0x)", "Efeitos Auxiliares (1.0x)"},
     {"Lower glow/blur GPU load", "Menor carga térmica de glow/blur"},
     {"Thermal DRS", "DRS Térmico"},
     {"Steps down scale if Severe", "Reduz escala se aquecer muito"},
     {"Pin Threads to Big Cores", "Fixar Threads (Núcleos Fortes)"},
+    {"Low-End Phone Preset", "Preset: Celular Fraco"},
+    {"Light Textures (-75% VRAM)", "Texturas Leves (-75% VRAM)"},
+    {"Half-res 3D world mips; keeps 2D HUD sharp.", "Reduz mips 3D; mantém HUD/textos nítidos."},
+    {"Vulkan Swapchain Pre-Rotation", "Pré-Rotação Vulkan (Swapchain)"},
     {"Performance HUD", "Desempenho (HUD)"},
     {"Off", "Desligado"},
     {"FPS Only", "Apenas FPS"},
@@ -102,8 +113,18 @@ constexpr Entry kTable[int(Str::Count)] = {
     {"Advanced", "Avançado"},
 
     {"Virtual Touch Controls", "Controles Virtuais na Tela"},
+    {"Auto-Hide Touch When Gamepad Connected", "Ocultar Touch com Controle Conectado"},
     {"Touch Controls Opacity", "Opacidade dos Controles Touch"},
+    {"Touch Auto-Aim + Fire (On-Foot RT = LT+RT)", "Mira Automática + Tiro no Touch (RT a pé = LT+RT)"},
+    {"Locks on while firing on foot without affecting driving.",
+     "Trava a mira ao atirar a pé sem interferir ao dirigir veículos."},
+    {"Controller Vibration (Rumble)", "Vibração do Controle (Rumble)"},
     {"GTA-Style Driving Controls (modern_pad)", "Direção Estilo GTA (modern_pad)"},
+    {"Edit Touch Layout", "Editar Layout Touch"},
+    {"Reset Layout", "Resetar Layout"},
+    {"Drag buttons to move | Selected:", "Arraste para mover | Selecionado:"},
+    {"Size", "Tam."},
+    {"Save & Exit", "Salvar e Sair"},
     {"Physical Gamepad:", "Controle Físico:"},
     {"Connected", "Conectado"},
     {"Not detected", "Não detectado"},
@@ -117,8 +138,8 @@ constexpr Entry kTable[int(Str::Count)] = {
     {"Resume Game", "Voltar ao Jogo"},
 
     // Credits Tab
-    {"LittleRecomp v0.1.0-beta — Native Android ARM64 Port",
-     "LittleRecomp v0.1.0-beta — Port Nativo Android ARM64"},
+    {"LittleRecomp v0.2.0-beta — Native Android ARM64 Port",
+     "LittleRecomp v0.2.0-beta — Port Nativo Android ARM64"},
     {"This project is an Android ARM64 + Vulkan 1.1 TBDR port of the Windows PC recompilation.\n\n"
      "FULL CREDITS TO THE ORIGINAL PC PORT AUTHOR:\n"
      "- efm-games/scarface-recomp: All static recompilation work, Xbox reverse-engineering, game hooks,\n"
@@ -139,6 +160,7 @@ constexpr Entry kTable[int(Str::Count)] = {
      "Vulkan mobile TBDR, áudio Oboe, controles touch, ADPF e UI Android. Nenhum asset do jogo está incluso."},
     {"Device Diagnostics:", "Diagnóstico do Aparelho:"},
 };
+static_assert(std::size(kTable) == size_t(Str::Count), "i18n table mismatch");
 
 }  // namespace
 

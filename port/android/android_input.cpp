@@ -15,6 +15,10 @@
 #include "core/log.h"
 #include "touch_controls.h"
 
+namespace kbm {
+bool IsInVehicle();
+}
+
 namespace input {
 
 namespace {
@@ -117,18 +121,21 @@ Pad Poll(int port) {
         p = g_hw_snapshot[size_t(port)];
     }
 
-    if (port == 0 && app::AndroidSettings().touch_controls) {
+    if (port == 0 && app::EffectiveTouchEnabled()) {
         Pad tp = touch::GetPad();
         p.connected = true;
         p.buttons |= tp.buttons;
         for (int i = 0; i < 8; ++i) p.analog[i] = std::max(p.analog[i], tp.analog[i]);
+        if (app::AndroidSettings().touch_auto_aim_fire && tp.analog[7] > 0 && !kbm::IsInVehicle()) {
+            p.analog[6] = 255;
+        }
         p.lx = AddStick(p.lx, tp.lx);
         p.ly = AddStick(p.ly, tp.ly);
         p.rx = AddStick(p.rx, tp.rx);
         p.ry = AddStick(p.ry, tp.ry);
     }
 
-    if (app::OverlayOpen()) {
+    if (app::OverlayOpen() || touch::IsEditing()) {
         p.connected = p.connected || port == 0;
         p.buttons = 0;
         for (uint8_t& a : p.analog) a = 0;
@@ -152,6 +159,10 @@ uint16_t HeldOnAnyController() {
 }
 
 void Rumble(int port, uint16_t left, uint16_t right) {
+    if (!app::AndroidSettings().controller_rumble) {
+        left = 0;
+        right = 0;
+    }
     if (app::kGame.rumble) app::kGame.rumble(port, left, right);
     std::lock_guard<std::mutex> lock(g_lock);
     if (port >= 0 && port < 4 && g_pads[port]) SDL_RumbleGamepad(g_pads[port], left, right, 0);

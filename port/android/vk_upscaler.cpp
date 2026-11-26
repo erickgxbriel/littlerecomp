@@ -11,11 +11,27 @@ namespace {
 
 const char* kUpscaleVs = R"(#version 450
 precision highp float;
+layout(push_constant) uniform PC {
+    highp vec4 src_size; // xy = size, zw = 1/size
+    highp vec4 params;   // x = gamma_on, y = sharpness, z = rot_mode
+} pc;
 layout(location = 0) out vec2 out_uv;
 void main() {
-    vec2 t = vec2(float((gl_VertexIndex << 1) & 2), float(gl_VertexIndex & 2));
-    gl_Position = vec4(t * vec2(2.0, 2.0) + vec2(-1.0, -1.0), 0.0, 1.0);
-    out_uv = t;
+    const vec2 pos[6] = vec2[6](
+        vec2(-1.0, -1.0), vec2( 1.0, -1.0), vec2( 1.0,  1.0),
+        vec2(-1.0, -1.0), vec2( 1.0,  1.0), vec2(-1.0,  1.0)
+    );
+    const vec2 uvs[6] = vec2[6](
+        vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+        vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0)
+    );
+    vec2 p = pos[gl_VertexIndex];
+    int r = int(pc.params.z + 0.5);
+    if (r == 1) p = vec2(-p.y, p.x);
+    else if (r == 2) p = vec2(-p.x, -p.y);
+    else if (r == 3) p = vec2(p.y, -p.x);
+    gl_Position = vec4(p, 0.0, 1.0);
+    out_uv = uvs[gl_VertexIndex];
 }
 )";
 
@@ -196,7 +212,7 @@ bool Upscaler::Init(VkDevice device, VkPipelineCache vk_cache, vk_sh::ShaderCach
     if (vkCreateDescriptorSetLayout(device_, &dslci, nullptr, &set_layout_) != VK_SUCCESS) return false;
 
     VkPushConstantRange pcr{};
-    pcr.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pcr.offset = 0;
     pcr.size = sizeof(UpscalePush);
 
@@ -224,7 +240,7 @@ bool Upscaler::Init(VkDevice device, VkPipelineCache vk_cache, vk_sh::ShaderCach
     dsai.pSetLayouts = layouts;
     if (vkAllocateDescriptorSets(device_, &dsai, sets_) != VK_SUCCESS) return false;
 
-    vs_mod_ = shaders_->GetOrCompile(gpu::Hash("upscale_vs_v1", 13), false, kUpscaleVs);
+    vs_mod_ = shaders_->GetOrCompile(gpu::Hash("upscale_vs_v2", 13), false, kUpscaleVs);
     fs_mods_[0] = shaders_->GetOrCompile(gpu::Hash("upscale_bi_v1", 13), true, std::string(kUpscaleCommon) + kBilinearBody);
     fs_mods_[1] = shaders_->GetOrCompile(gpu::Hash("upscale_gsr_v1", 14), true, std::string(kUpscaleCommon) + kGsrV1Body);
     fs_mods_[2] = shaders_->GetOrCompile(gpu::Hash("upscale_fsr_v1", 14), true, std::string(kUpscaleCommon) + kFsr1Body);
@@ -344,9 +360,9 @@ void Upscaler::Shutdown() {
 }
 
 void Upscaler::Draw(VkCommandBuffer cmd, uint32_t frame_idx, VkImageView src_view, VkImageView gamma_lut_view,
-                    uint32_t src_w, uint32_t src_h, bool gamma_enabled, VkExtent2D swap_extent,
-                    bool widescreen, int mode) {
-    if (!ready_ || src_view == VK_NULL_HANDLE || src_w == 0 || src_h == 0) return;
+                    uint32_t src_w, uint32_t src_h, bool gamma_enabled, uint32_t logical_w, uint32_t logical_h,
+                    VkExtent2D swap_extent, int rot_mode, bool widescreen, int aspect_mode, int mode) {
+    if (!ready_ || src_view == VK_NULL_HANDLE || src_w == 0 || src_h == 0 || logical_w == 0 || logical_h == 0) return;
     int idx = std::clamp(mode, 0, 2);
     if (pipelines_[idx] == VK_NULL_HANDLE) return;
 
@@ -369,15 +385,27 @@ void Upscaler::Draw(VkCommandBuffer cmd, uint32_t frame_idx, VkImageView src_vie
     }
     vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
 
-    const float aspect = widescreen ? (16.0f / 9.0f) : (4.0f / 3.0f);
-    const float sw = float(swap_extent.width);
-    const float sh = float(swap_extent.height);
-    const float vw = std::min(sw, sh * aspect);
-    const float vh = vw / aspect;
-    const float vx = (sw - vw) * 0.5f;
-    const float vy = (sh - vh) * 0.5f;
+    const float lw = float(logical_w);
+    const float lh = float(logical_h);
+    float vx = 0.0f, vy = 0.0f, vw = lw, vh = lh;
+    if (aspect_mode != 1) {
+        const float aspect = widescreen ? (16.0f / 9.0f) : (4.0f / 3.0f);
+        vw = std::min(lw, lh * aspect);
+        vh = vw / aspect;
+        vx = (lw - vw) * 0.5f;
+        vy = (lh - vh) * 0.5f;
+    }
 
-    VkViewport vp{vx, vy, vw, vh, 0.0f, 1.0f};
+    VkViewport vp{};
+    if (rot_mode == 1) {
+        vp = {lh - (vy + vh), vx, vh, vw, 0.0f, 1.0f};
+    } else if (rot_mode == 2) {
+        vp = {lw - (vx + vw), lh - (vy + vh), vw, vh, 0.0f, 1.0f};
+    } else if (rot_mode == 3) {
+        vp = {vy, lw - (vx + vw), vh, vw, 0.0f, 1.0f};
+    } else {
+        vp = {vx, vy, vw, vh, 0.0f, 1.0f};
+    }
     VkRect2D sc{{0, 0}, swap_extent};
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
@@ -386,14 +414,14 @@ void Upscaler::Draw(VkCommandBuffer cmd, uint32_t frame_idx, VkImageView src_vie
         float(src_w), float(src_h), 1.0f / float(src_w), 1.0f / float(src_h),
         gamma_enabled ? 1.0f : 0.0f,
         (idx == 1) ? 0.35f : (idx == 2) ? 0.55f : 0.0f,
-        0.0f, 0.0f
+        float(rot_mode), 0.0f
     };
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_[idx]);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_layout_, 0, 1,
                             &sets_[frame_idx % kFrames], 0, nullptr);
-    vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
-    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+    vkCmdDraw(cmd, 6, 1, 0, 0);
 }
 
 }  // namespace vk

@@ -72,8 +72,72 @@ uint32_t Disc::ReadAt(uint64_t at, void* out, uint32_t len) const {
     if (!GetOverlappedResult(HANDLE(file_), &o, &got, TRUE)) return 0;
     return got;
 #else
-    ssize_t got = pread(int(file_), out, len, off_t(at));
-    return got > 0 ? uint32_t(got) : 0;
+    if (len == 0) return 0;
+    if (len > kCacheBlockSize / 2) {
+        ssize_t got = pread(int(file_), out, len, off_t(at));
+        return got > 0 ? uint32_t(got) : 0;
+    }
+    uint8_t* dst = static_cast<uint8_t*>(out);
+    uint32_t total = 0;
+    thread_local std::vector<uint8_t> tmp(kCacheBlockSize);
+    while (total < len) {
+        const uint64_t cur = at + total;
+        const uint64_t block_base = cur & ~uint64_t(kCacheBlockSize - 1);
+        const uint32_t block_off = uint32_t(cur - block_base);
+        const uint32_t want = std::min(len - total, kCacheBlockSize - block_off);
+
+        uint32_t copied = 0;
+        bool eof_in_block = false;
+        bool hit = false;
+        {
+            std::lock_guard<std::mutex> lk(cache_mutex_);
+            for (CacheSlot& s : cache_) {
+                if (s.base == block_base && !s.buf.empty()) {
+                    s.stamp = ++cache_stamp_;
+                    if (block_off < s.valid) {
+                        copied = std::min(want, s.valid - block_off);
+                        std::memcpy(dst + total, s.buf.data() + block_off, copied);
+                    }
+                    eof_in_block = (s.valid < kCacheBlockSize) && (block_off + copied >= s.valid);
+                    hit = true;
+                    break;
+                }
+            }
+        }
+        if (!hit) {
+            ssize_t got = pread(int(file_), tmp.data(), kCacheBlockSize, off_t(block_base));
+            if (got <= 0) break;
+            const uint32_t valid = uint32_t(got);
+            if (block_off < valid) {
+                copied = std::min(want, valid - block_off);
+                std::memcpy(dst + total, tmp.data() + block_off, copied);
+            }
+            eof_in_block = (valid < kCacheBlockSize) && (block_off + copied >= valid);
+
+            std::lock_guard<std::mutex> lk(cache_mutex_);
+            size_t victim = 0;
+            uint64_t best_stamp = UINT64_MAX;
+            for (size_t i = 0; i < cache_.size(); ++i) {
+                if (cache_[i].base == block_base) {
+                    victim = i;
+                    break;
+                }
+                if (cache_[i].stamp < best_stamp) {
+                    best_stamp = cache_[i].stamp;
+                    victim = i;
+                }
+            }
+            CacheSlot& vs = cache_[victim];
+            if (vs.buf.size() != kCacheBlockSize) vs.buf.resize(kCacheBlockSize);
+            std::memcpy(vs.buf.data(), tmp.data(), valid);
+            vs.base = block_base;
+            vs.valid = valid;
+            vs.stamp = ++cache_stamp_;
+        }
+        total += copied;
+        if (copied == 0 || eof_in_block) break;
+    }
+    return total;
 #endif
 }
 
@@ -119,6 +183,9 @@ bool Disc::OpenFd(int fd, std::filesystem::path display_path, std::string& error
 #endif
 
 bool Disc::OpenMountedFd(std::string& error) {
+#if defined(__linux__) || defined(__ANDROID__)
+    posix_fadvise(int(file_), 0, 0, POSIX_FADV_NORMAL);
+#endif
     for (uint64_t base : kPartitions) {
         uint8_t volume[kSector];
         if (ReadAt(base + kVolume, volume, kSector) != kSector || std::memcmp(volume, kMagic, kMagicSize) != 0 ||
