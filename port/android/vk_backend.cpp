@@ -49,10 +49,110 @@ VulkanStats g_stats;
 
 enum class RpEndReason : uint8_t { Sw, Tex, RtTex, Fb, Copy, Clear, Sub, Late, Oth, Count };
 
+struct TexSlabAlloc {
+    uint32_t slab_idx = UINT32_MAX;
+    VkDeviceSize offset = 0;
+    VkDeviceSize size = 0;
+    bool valid() const { return slab_idx != UINT32_MAX && size > 0; }
+};
+
 struct GarbageItem {
-    enum class Kind : uint8_t { Image, ImageView, Buffer, Memory, Framebuffer, DescriptorSet };
+    enum class Kind : uint8_t { Image, ImageView, Buffer, Memory, Framebuffer, DescriptorSet, TexSlab };
     Kind kind;
     uint64_t handle = 0;
+    TexSlabAlloc slab{};
+};
+
+class TexSlabAllocator {
+public:
+    static constexpr VkDeviceSize kSlabSize = 16ull << 20;     // 16 MB DEVICE_LOCAL slab
+    static constexpr VkDeviceSize kMaxSubAlloc = 4ull << 20;  // <= 4 MB sub-allocated; larger use dedicated alloc
+    static constexpr size_t kMaxSlabs = 24;                   // up to 384 MB pooled VRAM
+
+    bool Alloc(VkDevice dev, VkDeviceSize size, VkDeviceSize align, uint32_t mem_type,
+               VkDeviceMemory& out_mem, TexSlabAlloc& out_alloc) {
+        if (!dev || size == 0 || size > kMaxSubAlloc || mem_type == UINT32_MAX) return false;
+        align = std::max<VkDeviceSize>(align, 1u);
+
+        for (uint32_t si = 0; si < uint32_t(slabs_.size()); ++si) {
+            Slab& s = slabs_[si];
+            if (s.mem_type != mem_type) continue;
+            for (size_t fi = 0; fi < s.free_list.size(); ++fi) {
+                const VkDeviceSize b_off = s.free_list[fi].first;
+                const VkDeviceSize b_sz = s.free_list[fi].second;
+                const VkDeviceSize aligned = ((b_off + align - 1u) / align) * align;
+                const VkDeviceSize pad = aligned - b_off;
+                if (b_sz < pad + size) continue;
+
+                const VkDeviceSize rem = b_sz - pad - size;
+                if (pad > 0 && rem > 0) {
+                    s.free_list[fi] = {b_off, pad};
+                    s.free_list.insert(s.free_list.begin() + ptrdiff_t(fi + 1), {aligned + size, rem});
+                } else if (pad > 0) {
+                    s.free_list[fi] = {b_off, pad};
+                } else if (rem > 0) {
+                    s.free_list[fi] = {aligned + size, rem};
+                } else {
+                    s.free_list.erase(s.free_list.begin() + ptrdiff_t(fi));
+                }
+                out_mem = s.mem;
+                out_alloc = {si, aligned, size};
+                return true;
+            }
+        }
+
+        if (slabs_.size() >= kMaxSlabs) return false;
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = kSlabSize;
+        mai.memoryTypeIndex = mem_type;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        if (vkAllocateMemory(dev, &mai, nullptr, &mem) != VK_SUCCESS || mem == VK_NULL_HANDLE) {
+            return false;
+        }
+        Slab s;
+        s.mem = mem;
+        s.mem_type = mem_type;
+        if (kSlabSize > size) {
+            s.free_list.push_back({size, kSlabSize - size});
+        }
+        const uint32_t si = uint32_t(slabs_.size());
+        slabs_.push_back(std::move(s));
+        out_mem = mem;
+        out_alloc = {si, 0, size};
+        return true;
+    }
+
+    void Free(const TexSlabAlloc& a) {
+        if (!a.valid() || a.slab_idx >= slabs_.size()) return;
+        auto& fl = slabs_[a.slab_idx].free_list;
+        auto it = std::lower_bound(fl.begin(), fl.end(), std::make_pair(a.offset, VkDeviceSize(0)));
+        it = fl.insert(it, {a.offset, a.size});
+        if (it + 1 != fl.end() && it->first + it->second == (it + 1)->first) {
+            it->second += (it + 1)->second;
+            fl.erase(it + 1);
+        }
+        if (it != fl.begin() && (it - 1)->first + (it - 1)->second == it->first) {
+            (it - 1)->second += it->second;
+            fl.erase(it);
+        }
+    }
+
+    void Shutdown(VkDevice dev) {
+        for (Slab& s : slabs_) {
+            if (s.mem && dev) vkFreeMemory(dev, s.mem, nullptr);
+        }
+        slabs_.clear();
+    }
+
+    size_t SlabCount() const { return slabs_.size(); }
+
+private:
+    struct Slab {
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        uint32_t mem_type = 0;
+        std::vector<std::pair<VkDeviceSize, VkDeviceSize>> free_list;
+    };
+    std::vector<Slab> slabs_;
 };
 
 struct TexDescEntry {
@@ -102,6 +202,7 @@ struct Target {
 struct Tex {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory mem = VK_NULL_HANDLE;
+    TexSlabAlloc slab_alloc{};
     VkImageView view = VK_NULL_HANDLE;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
@@ -109,6 +210,8 @@ struct Tex {
     uint32_t levels = 1;
     uint64_t sig = 0;
     uint64_t frame = 0;
+    uint64_t sig_frame = 0;
+    uint64_t epoch = 0;
     uint64_t palette = 0;
     size_t vram_bytes = 0;
     uint8_t mip_skip = 0;
@@ -291,18 +394,40 @@ VkBorderColor NearestBorderColor(uint32_t argb) {
     return (r + g + b >= 384u) ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
 }
 
-constexpr uint32_t kSigWholeMax = 65536;
-constexpr uint32_t kSigSamples = 64;
-constexpr uint32_t kSigSampleBytes = 64;
+constexpr uint32_t kSigWholeMax = 512;
+constexpr uint32_t kSigSamples = 16;
+
+inline uint64_t Mix64(uint64_t h, uint64_t v) {
+    h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h = (h ^ (h >> 30)) * 0xbf58476d1ce4e5b9ull;
+    return h ^ (h >> 27);
+}
 
 uint64_t MemSig(uint32_t data, uint32_t total) {
     const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(data));
-    uint64_t sig = Hash(&total, sizeof(total));
+    uint64_t sig = 0xcbf29ce484222325ull ^ total;
     if (total == 0) return sig;
-    if (total <= kSigWholeMax) return Hash(p, total, sig);
+    if (total <= kSigWholeMax) {
+        uint32_t off = 0;
+        for (; off + 8u <= total; off += 8u) {
+            uint64_t w = 0;
+            std::memcpy(&w, p + off, 8);
+            sig = Mix64(sig, w);
+        }
+        if (off < total) {
+            uint64_t tail = 0;
+            std::memcpy(&tail, p + off, total - off);
+            sig = Mix64(sig, tail);
+        }
+        return sig;
+    }
+    const uint32_t span = total - 16u;
     for (uint32_t i = 0; i < kSigSamples; ++i) {
-        const uint8_t* sample = p + uint64_t(total - kSigSampleBytes) * i / (kSigSamples - 1);
-        sig = Hash(sample, kSigSampleBytes, sig);
+        uint64_t w0 = 0, w1 = 0;
+        const uint8_t* sample = p + (uint64_t(span) * i) / (kSigSamples - 1u);
+        std::memcpy(&w0, sample, 8);
+        std::memcpy(&w1, sample + 8, 8);
+        sig = Mix64(sig, w0 ^ (w1 * 0x9e3779b185ebca87ull));
     }
     return sig;
 }
@@ -627,6 +752,7 @@ private:
     bool CreateDummies();
     void DeferDestroy(GarbageItem::Kind k, uint64_t handle);
     void DeferView(VkImageView& v);
+    void DeferSlab(TexSlabAlloc& s);
     void InvalidateTexDescriptorsForView(VkImageView view);
     void InvalidateBoundState();
     template <typename T>
@@ -710,6 +836,7 @@ private:
     uint64_t frame_idx_ = 0;
     uint64_t next_serial_ = 1;
     std::atomic<uint64_t> completed_serial_{0};
+    VkSemaphore timeline_sem_ = VK_NULL_HANDLE;
 
     VkSampler blit_linear_ = VK_NULL_HANDLE;
     VkSampler blit_point_ = VK_NULL_HANDLE;
@@ -753,6 +880,7 @@ private:
     std::unordered_map<uint32_t, uint64_t> target_used_;
     std::unordered_set<uint32_t> persistent_depth_addrs_;
     std::unordered_map<uint64_t, Tex> textures_;
+    TexSlabAllocator tex_slab_;
     size_t tex_vram_bytes_ = 0;
 
     std::unordered_map<uint32_t, Late> late_;
@@ -774,6 +902,7 @@ private:
     uint32_t guest_w_ = 640, guest_h_ = 480;
     float scale_ = 1.5f;
     bool native_aux_rt_ = true;
+    bool half_aux_rt_ = true;
     bool low_vram_tex_ = false;
     int last_thermal_status_ = 0;
     std::chrono::steady_clock::time_point last_present_tp_ = std::chrono::steady_clock::now();
@@ -904,6 +1033,16 @@ void VulkanBackend::DeferView(VkImageView& v) {
     }
 }
 
+void VulkanBackend::DeferSlab(TexSlabAlloc& s) {
+    if (s.valid()) {
+        GarbageItem item{};
+        item.kind = GarbageItem::Kind::TexSlab;
+        item.slab = s;
+        CurFrame().garbage.push_back(item);
+        s = TexSlabAlloc{};
+    }
+}
+
 void VulkanBackend::InvalidateBoundState() {
     bound_pso_ = VK_NULL_HANDLE;
     bound_tex_set_ = VK_NULL_HANDLE;
@@ -930,6 +1069,9 @@ void VulkanBackend::CollectGarbage(Frame& f) {
             case GarbageItem::Kind::Memory:
                 vkFreeMemory(dev_, reinterpret_cast<VkDeviceMemory>(g.handle), nullptr);
                 break;
+            case GarbageItem::Kind::TexSlab:
+                tex_slab_.Free(g.slab);
+                break;
             case GarbageItem::Kind::DescriptorSet:
                 if (tex_desc_pool_) {
                     VkDescriptorSet ds = reinterpret_cast<VkDescriptorSet>(g.handle);
@@ -949,6 +1091,28 @@ void VulkanBackend::AdvanceCompletedSerial(uint64_t ser) {
 }
 
 bool VulkanBackend::WaitFrameIfNeeded(Frame& f, uint64_t max_serial, uint64_t* wait_ns) {
+    if (timeline_sem_ != VK_NULL_HANDLE) {
+        std::lock_guard<std::mutex> flk(f.fence_mutex);
+        if (!f.submitted || f.fence_serial > max_serial) return false;
+        uint64_t done = completed_serial_.load(std::memory_order_acquire);
+        if (done < f.fence_serial) {
+            PollCompletedSerial();
+            done = completed_serial_.load(std::memory_order_acquire);
+        }
+        if (done < f.fence_serial) {
+            auto t0 = wait_ns ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            ctx_->WaitTimelineSemaphore(timeline_sem_, f.fence_serial, UINT64_MAX);
+            if (wait_ns) {
+                *wait_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now() - t0)
+                                         .count());
+            }
+            AdvanceCompletedSerial(f.fence_serial);
+        }
+        f.submitted = false;
+        return true;
+    }
+
     std::lock_guard<std::mutex> flk(f.fence_mutex);
     if (!f.submitted || f.fence_serial > max_serial) return false;
     auto t0 = wait_ns ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -964,6 +1128,13 @@ bool VulkanBackend::WaitFrameIfNeeded(Frame& f, uint64_t max_serial, uint64_t* w
 }
 
 void VulkanBackend::PollCompletedSerial() {
+    if (timeline_sem_ != VK_NULL_HANDLE) {
+        uint64_t done = 0;
+        if (ctx_->GetSemaphoreCounter(timeline_sem_, done)) {
+            AdvanceCompletedSerial(done);
+        }
+        return;
+    }
     for (Frame& f : frames_) {
         std::lock_guard<std::mutex> flk(f.fence_mutex);
         if (f.submitted && vkGetFenceStatus(dev_, f.fence) == VK_SUCCESS) {
@@ -1031,30 +1202,62 @@ void VulkanBackend::SubmitCurrent(bool wait, uint64_t* wait_bucket) {
     cmds[cmd_count++] = f.cmd;
     {
         std::lock_guard<std::mutex> flk(f.fence_mutex);
-        vkResetFences(dev_, 1, &f.fence);
         f.fence_serial = next_serial_++;
         f.submitted = true;
 
-        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        si.commandBufferCount = cmd_count;
-        si.pCommandBuffers = cmds;
-        {
-            std::lock_guard<std::mutex> q(ctx_->QueueMutex());
-            VkResult rc = vkQueueSubmit(ctx_->Queue(), 1, &si, f.fence);
-            if (rc != VK_SUCCESS) {
-                LOGE("vk_backend: vkQueueSubmit failed rc=%d (cmds=%u)", int(rc), cmd_count);
+        if (timeline_sem_ != VK_NULL_HANDLE) {
+            VkTimelineSemaphoreSubmitInfo tssi{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+            tssi.signalSemaphoreValueCount = 1;
+            tssi.pSignalSemaphoreValues = &f.fence_serial;
+
+            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            si.pNext = &tssi;
+            si.commandBufferCount = cmd_count;
+            si.pCommandBuffers = cmds;
+            si.signalSemaphoreCount = 1;
+            si.pSignalSemaphores = &timeline_sem_;
+            {
+                std::lock_guard<std::mutex> q(ctx_->QueueMutex());
+                VkResult rc = vkQueueSubmit(ctx_->Queue(), 1, &si, VK_NULL_HANDLE);
+                if (rc != VK_SUCCESS) {
+                    LOGE("vk_backend: vkQueueSubmit(timeline) failed rc=%d (cmds=%u)", int(rc), cmd_count);
+                }
             }
-        }
-        if (wait) {
-            auto wt0 = std::chrono::steady_clock::now();
-            vkWaitForFences(dev_, 1, &f.fence, VK_TRUE, UINT64_MAX);
-            uint64_t wns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                        std::chrono::steady_clock::now() - wt0)
-                                        .count());
-            sec_wait_ns_ += wns;
-            if (wait_bucket) *wait_bucket += wns;
-            AdvanceCompletedSerial(f.fence_serial);
-            f.submitted = false;
+            if (wait) {
+                auto wt0 = std::chrono::steady_clock::now();
+                ctx_->WaitTimelineSemaphore(timeline_sem_, f.fence_serial, UINT64_MAX);
+                uint64_t wns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::steady_clock::now() - wt0)
+                                            .count());
+                sec_wait_ns_ += wns;
+                if (wait_bucket) *wait_bucket += wns;
+                AdvanceCompletedSerial(f.fence_serial);
+                f.submitted = false;
+            }
+        } else {
+            vkResetFences(dev_, 1, &f.fence);
+
+            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            si.commandBufferCount = cmd_count;
+            si.pCommandBuffers = cmds;
+            {
+                std::lock_guard<std::mutex> q(ctx_->QueueMutex());
+                VkResult rc = vkQueueSubmit(ctx_->Queue(), 1, &si, f.fence);
+                if (rc != VK_SUCCESS) {
+                    LOGE("vk_backend: vkQueueSubmit failed rc=%d (cmds=%u)", int(rc), cmd_count);
+                }
+            }
+            if (wait) {
+                auto wt0 = std::chrono::steady_clock::now();
+                vkWaitForFences(dev_, 1, &f.fence, VK_TRUE, UINT64_MAX);
+                uint64_t wns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::steady_clock::now() - wt0)
+                                            .count());
+                sec_wait_ns_ += wns;
+                if (wait_bucket) *wait_bucket += wns;
+                AdvanceCompletedSerial(f.fence_serial);
+                f.submitted = false;
+            }
         }
     }
     if (wait) CollectGarbage(f);
@@ -1064,6 +1267,18 @@ void VulkanBackend::SubmitCurrent(bool wait, uint64_t* wait_bucket) {
 
 void VulkanBackend::WaitSerial(uint64_t serial) {
     if (serial == 0 || completed_serial_.load(std::memory_order_acquire) >= serial) return;
+    if (timeline_sem_ != VK_NULL_HANDLE) {
+        if (serial < next_serial_) {
+            PollCompletedSerial();
+            if (completed_serial_.load(std::memory_order_acquire) < serial) {
+                ctx_->WaitTimelineSemaphore(timeline_sem_, serial, UINT64_MAX);
+                AdvanceCompletedSerial(serial);
+            }
+            return;
+        }
+        Flush();
+        return;
+    }
     for (Frame& f : frames_) {
         WaitFrameIfNeeded(f, serial);
     }
@@ -1183,6 +1398,7 @@ bool VulkanBackend::Init(uint32_t width, uint32_t height) {
     guest_h_ = height;
     scale_ = app::RenderScale(height);
     native_aux_rt_ = app::AndroidSettings().native_aux_rt;
+    half_aux_rt_ = app::AndroidSettings().half_aux_rt;
     low_vram_tex_ = app::AndroidSettings().low_vram_tex;
     adpf::RegisterRenderThread(gettid());
 
@@ -1313,9 +1529,19 @@ bool VulkanBackend::Init(uint32_t width, uint32_t height) {
         ramp_[i] = ramp_[256 + i] = ramp_[512 + i] = uint8_t(i);
     }
 
-    LOGR("vk_backend: initialized guest=%ux%u scale=%.2f bc=%u lazy_depth=%u r32f_lin=%u depth_lin=%u",
+    if (ctx_->HasTimelineSemaphore()) {
+        VkSemaphoreTypeCreateInfo stci{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+        stci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        stci.initialValue = 0;
+        VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &stci};
+        if (vkCreateSemaphore(dev_, &sci, nullptr, &timeline_sem_) != VK_SUCCESS) {
+            timeline_sem_ = VK_NULL_HANDLE;
+        }
+    }
+
+    LOGR("vk_backend: initialized guest=%ux%u scale=%.2f bc=%u lazy_depth=%u timeline_sem=%u r32f_lin=%u depth_lin=%u",
          width, height, scale_, unsigned(ctx_->HasBC()), unsigned(ctx_->HasLazyMemory()),
-         unsigned(r32f_linear_), unsigned(depth_linear_));
+         unsigned(timeline_sem_ != VK_NULL_HANDLE), unsigned(r32f_linear_), unsigned(depth_linear_));
     return true;
 }
 
@@ -1381,6 +1607,11 @@ VulkanBackend::~VulkanBackend() {
         if (f.stream_mem) vkFreeMemory(dev_, f.stream_mem, nullptr);
         if (f.fence) vkDestroyFence(dev_, f.fence, nullptr);
         if (f.pool) vkDestroyCommandPool(dev_, f.pool, nullptr);
+    }
+    tex_slab_.Shutdown(dev_);
+    if (timeline_sem_) {
+        vkDestroySemaphore(dev_, timeline_sem_, nullptr);
+        timeline_sem_ = VK_NULL_HANDLE;
     }
     if (tex_desc_pool_) vkDestroyDescriptorPool(dev_, tex_desc_pool_, nullptr);
     if (ubo_pool_) vkDestroyDescriptorPool(dev_, ubo_pool_, nullptr);
@@ -1639,9 +1870,10 @@ void VulkanBackend::ReleaseTarget(Target& t) {
 
 bool VulkanBackend::CreateTargetResources(Target& t) {
     const bool is_aux = native_aux_rt_ && (t.gw < guest_w_ || t.gh < guest_h_);
-    const float eff_scale = is_aux ? std::min(1.0f, scale_) : scale_;
-    t.w = std::max(1u, uint32_t(std::lround(t.gw * eff_scale)));
-    t.h = std::max(1u, uint32_t(std::lround(t.gh * eff_scale)));
+    const float aux_cap = half_aux_rt_ ? 0.5f : 1.0f;
+    const float eff_scale = is_aux ? std::min(aux_cap, scale_) : scale_;
+    t.w = std::max(is_aux ? 32u : 1u, uint32_t(std::lround(t.gw * eff_scale)));
+    t.h = std::max(is_aux ? 32u : 1u, uint32_t(std::lround(t.gh * eff_scale)));
     if (t.depth) {
         t.fmt = ctx_->DepthFormat();
         bool force_pers = t.persistent_forced || persistent_depth_addrs_.count(t.data) > 0;
@@ -1883,6 +2115,7 @@ VkImageView VulkanBackend::EnsureFeedback(Target& t) {
 bool VulkanBackend::CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi) {
     DeferView(tx.view);
     Defer(GarbageItem::Kind::Image, tx.image);
+    DeferSlab(tx.slab_alloc);
     Defer(GarbageItem::Kind::Memory, tx.mem);
     tex_vram_bytes_ = (tex_vram_bytes_ > tx.vram_bytes) ? (tex_vram_bytes_ - tx.vram_bytes) : 0;
 
@@ -1921,19 +2154,53 @@ bool VulkanBackend::CreateTexture(Tex& tx, const TextureDesc& d, const FormatInf
     VkImageCreateFlags flags = d.cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
     uint32_t layers = d.cube ? 6u : d.depth;
 
-    if (!CreateImage2D(w, h, tx.levels, layers, type, flags, tx.fmt,
-                       VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, tx.image, tx.mem)) {
-        ReleaseOldTextures(true);
-        if (!CreateImage2D(w, h, tx.levels, layers, type, flags, tx.fmt,
-                           VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, tx.image, tx.mem)) {
-            return false;
-        }
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.flags = flags;
+    ici.imageType = type;
+    ici.format = tx.fmt;
+    ici.extent = {std::max(1u, w), std::max(1u, h), (type == VK_IMAGE_TYPE_3D) ? std::max(1u, layers) : 1u};
+    ici.mipLevels = std::max(1u, tx.levels);
+    ici.arrayLayers = (type == VK_IMAGE_TYPE_3D) ? 1u : std::max(1u, layers);
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(dev_, &ici, nullptr, &tx.image) != VK_SUCCESS) {
+        LOGE("vk_backend: vkCreateImage(%ux%u fmt=%d) failed", w, h, int(tx.fmt));
+        return false;
     }
 
     VkMemoryRequirements mr{};
     vkGetImageMemoryRequirements(dev_, tx.image, &mr);
+    const uint32_t mem_type = ctx_->FindMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    auto try_bind = [&]() -> bool {
+        if (mem_type == UINT32_MAX) return false;
+        VkDeviceMemory slab_mem = VK_NULL_HANDLE;
+        if (tex_slab_.Alloc(dev_, mr.size, mr.alignment, mem_type, slab_mem, tx.slab_alloc)) {
+            if (vkBindImageMemory(dev_, tx.image, slab_mem, tx.slab_alloc.offset) == VK_SUCCESS) return true;
+            tex_slab_.Free(tx.slab_alloc);
+            tx.slab_alloc = {};
+        }
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = mr.size;
+        mai.memoryTypeIndex = mem_type;
+        if (vkAllocateMemory(dev_, &mai, nullptr, &tx.mem) == VK_SUCCESS && tx.mem != VK_NULL_HANDLE) {
+            if (vkBindImageMemory(dev_, tx.image, tx.mem, 0) == VK_SUCCESS) return true;
+            vkFreeMemory(dev_, tx.mem, nullptr);
+            tx.mem = VK_NULL_HANDLE;
+        }
+        return false;
+    };
+
+    if (!try_bind()) {
+        ReleaseOldTextures(true);
+        if (!try_bind()) {
+            vkDestroyImage(dev_, tx.image, nullptr);
+            tx.image = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+
     tx.vram_bytes = mr.size;
     tex_vram_bytes_ += tx.vram_bytes;
 
@@ -2132,16 +2399,23 @@ VkImageView VulkanBackend::BindGuestTexture(const State& s, int stage, const Tex
         return d.cube ? dummy_cube_view_ : (d.depth > 1 ? dummy_3d_view_ : dummy_2d_view_);
     }
 
-    // Check guest memory at most once per frame (or on mismatch/palette swap).
+    // Check guest memory at most once per frame; static BCn world textures re-verify every 4 frames unless DirtyEpoch bumped.
     if (tx.frame != presents_ + 1 || !same || tx.palette != pal.hash) {
         tx.frame = presents_ + 1;
+        const uint64_t cur_epoch = DirtyEpoch(d.data);
+        const bool need_hash = !same || tx.palette != pal.hash || cur_epoch != tx.epoch ||
+                               !fi.compressed || (presents_ - tx.sig_frame) >= 4u;
         tx.palette = pal.hash;
-        uint32_t total = TotalSize(d);
-        uint64_t sig = MemSig(d.data, total) ^ DirtyEpoch(d.data) ^ pal.hash;
-        if (sig != tx.sig || !same) {
-            tx.sig = sig;
-            const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
-            UploadTexture(tx, d, fi, p, colours, same);
+        if (need_hash) {
+            tx.epoch = cur_epoch;
+            tx.sig_frame = presents_;
+            uint32_t total = TotalSize(d);
+            uint64_t sig = MemSig(d.data, total) ^ cur_epoch ^ pal.hash;
+            if (sig != tx.sig || !same) {
+                tx.sig = sig;
+                const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
+                UploadTexture(tx, d, fi, p, colours, same);
+            }
         }
     }
 
@@ -2721,6 +2995,14 @@ void VulkanBackend::UploadConstants(const State& s, const DrawShaders& sh, const
     bool prog = sh.prog;
     uint32_t ds_w = cur_draw_ds_ ? cur_draw_ds_->w : 0, ds_gw = cur_draw_ds_ ? cur_draw_ds_->gw : 0;
     FillDepthConstants(s, prog, ds_w, ds_gw, c);
+    c.zparams[3] = 1.0f;
+    if (app::AndroidSettings().aspect_mode == 2 && ctx_ && cur_draw_rt_ &&
+        cur_draw_rt_->gw == guest_w_ && cur_draw_rt_->gh == guest_h_ && s.rs[kRsZEnable] != 0) {
+        const float disp_aspect = float(ctx_->Width()) / std::max(1.0f, float(ctx_->Height()));
+        if (disp_aspect > (16.0f / 9.0f) + 0.02f) {
+            c.zparams[3] = (16.0f / 9.0f) / disp_aspect;
+        }
+    }
 
     float rt_shift = 0.0f;
     if (!sh.prog || ReadsViewportOffset(s.vs->program)) {
@@ -3472,6 +3754,7 @@ void VulkanBackend::ReleaseOldTextures(bool aggressive) {
             tex_vram_bytes_ = (tex_vram_bytes_ > it->second.vram_bytes) ? (tex_vram_bytes_ - it->second.vram_bytes) : 0;
             DeferView(it->second.view);
             Defer(GarbageItem::Kind::Image, it->second.image);
+            DeferSlab(it->second.slab_alloc);
             Defer(GarbageItem::Kind::Memory, it->second.mem);
             it = textures_.erase(it);
             ++freed;
@@ -3495,12 +3778,13 @@ void VulkanBackend::ApplySettings() {
     last_thermal_status_ = th.thermal_status;
 
     float req_scale = app::RenderScale(guest_h_);
-    float want = adpf::ComputeEffectiveScale(req_scale, ex.thermal_drs, last_thermal_status_);
+    float want = adpf::ComputeEffectiveScale(req_scale, ex.thermal_drs, last_thermal_status_, fps_val_, fps_target);
     bool want_aux = ex.native_aux_rt;
+    bool want_half_aux = ex.half_aux_rt;
 
-    if (std::fabs(want - scale_) > 1e-4f || want_aux != native_aux_rt_) {
-        LOGR("vk_backend: reconfiguring targets scale %.2fx -> %.2fx aux_rt=%d (therm=%d)",
-             scale_, want, int(want_aux), last_thermal_status_);
+    if (std::fabs(want - scale_) > 1e-4f || want_aux != native_aux_rt_ || want_half_aux != half_aux_rt_) {
+        LOGR("vk_backend: reconfiguring targets scale %.2fx -> %.2fx aux_rt=%d half=%d (therm=%d fps=%.1f)",
+             scale_, want, int(want_aux), int(want_half_aux), last_thermal_status_, fps_val_);
         Flush();
         ctx_->WaitIdle();
         ctx_->InvalidatePublished();
@@ -3510,6 +3794,7 @@ void VulkanBackend::ApplySettings() {
         CollectGarbage(CurFrame());
         scale_ = want;
         native_aux_rt_ = want_aux;
+        half_aux_rt_ = want_half_aux;
     }
 
     const bool want_low_vram = ex.low_vram_tex;
@@ -3520,6 +3805,7 @@ void VulkanBackend::ApplySettings() {
         for (auto& [tk, tx] : textures_) {
             if (tx.view) vkDestroyImageView(dev_, tx.view, nullptr);
             if (tx.image) vkDestroyImage(dev_, tx.image, nullptr);
+            tex_slab_.Free(tx.slab_alloc);
             if (tx.mem) vkFreeMemory(dev_, tx.mem, nullptr);
         }
         textures_.clear();

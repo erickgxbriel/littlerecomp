@@ -201,6 +201,8 @@ if(SCARFACE_BUILD_ANDROID_APP AND ANDROID)
         "${CMAKE_CURRENT_SOURCE_DIR}/android_adpf.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/cpu_affinity.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/i18n.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/achievements.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ptbr_loc.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/touch_controls.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/android_input.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/android_app.cpp"
@@ -230,7 +232,7 @@ if(SCARFACE_BUILD_ANDROID_APP AND ANDROID)
         "${imgui_SOURCE_DIR}/backends"
         "/opt/android-ndk/sources/third_party/shaderc/libshaderc/include"
     )
-    target_compile_definitions(main PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
+    target_compile_definitions(main PRIVATE VK_USE_PLATFORM_ANDROID_KHR SCARFACE_ANDROID_APP)
     target_compile_options(main PRIVATE
         $<IF:$<BOOL:${SCARFACE_RELEASE_OPT}>,-O3,-O2>
         $<$<BOOL:${SCARFACE_RELEASE_OPT}>:-DNDEBUG>

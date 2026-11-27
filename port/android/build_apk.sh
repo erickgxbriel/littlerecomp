@@ -137,7 +137,7 @@ if [ "$BUILD_TYPE" = "release" ]; then
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=LittleRecomp,O=OpenSource,C=BR"
     fi
-    OUT_APK="$BUILD_DIR/LittleRecomp-v0.2.0-beta-release.apk"
+    OUT_APK="$BUILD_DIR/LittleRecomp-v0.4.0-beta-release.apk"
 else
     KEYSTORE="$TOOLS_DIR/debug.keystore"
     KEY_ALIAS="androiddebugkey"

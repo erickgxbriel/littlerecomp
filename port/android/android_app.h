@@ -39,17 +39,22 @@ struct AndroidExtras {
     float touch_opacity = 0.55f;
     float render_scale = 1.5f;  // 1.0, 1.5 (default), 2.0, 2.25
     int upscaler = 1;           // 0 = Bilinear, 1 = Snapdragon GSR v1 (FP16), 2 = FSR 1.0 (FP16)
-    int aspect_mode = 1;        // 0 = 16:9 Original, 1 = Fullscreen (Fill)
+    int aspect_mode = 2;        // 0 = 16:9 Original, 1 = Fullscreen (Stretch), 2 = True Ultrawide (Default)
     bool pin_big_cores = true;
     int hud_mode = 0;           // 0 = Off, 1 = FPS Only, 2 = Basic (FPS + Temp), 3 = Advanced
     int language = 0;           // 0 = Auto, 1 = EN, 2 = PT-BR
     bool native_aux_rt = true;  // Keep off-screen auxiliary RTs at 1.0x scale
-    bool thermal_drs = false;   // Step down scale when SoC thermal status is Severe
+    bool half_aux_rt = false;   // Optional 0.5x aux RTs (-75% glow/blur load, opt-in)
+    bool thermal_drs = false;   // Optional Smart FPS + Thermal DRS (opt-in)
     bool touch_auto_aim_fire = false;  // On-foot RT touch engages LT+RT simultaneously
     bool swapchain_prerotate = true;   // Hardware swapchain pre-rotation (avoids SurfaceFlinger GPU pass)
     bool low_vram_tex = false;         // Skip mip 0 on >=128x128 3D textures to save 75% VRAM/bandwidth
     bool controller_rumble = false;    // Physical controller vibration (off by default)
     bool auto_hide_touch_with_pad = true;  // Hide on-screen touch controls when physical gamepad is connected
+    int ptbr_mode = 2;                 // 0 = Off, 1 = HD Subtitle Overlay, 2 = Native Menus + HD Subtitles
+    float subtitle_scale = 1.0f;       // HD subtitle font multiplier
+    bool mods_enabled = true;          // Override disc files from <ExeDir>/mods/
+    bool capture_subtitles = false;    // Log unlocalized strings to mods/ptbr/captured_keys.tsv
     std::string game_uri;
     std::string game_display_name;
 };
@@ -85,6 +90,8 @@ void SetStatusPhysicalPad(bool connected);
 void RequestBootRetry();
 void SetPickedIsoUri(const std::string& uri, const std::string& display_name);
 void SetPickedGameFolder(const std::string& path);
+void SetSavesStatus(bool ok, const std::string& msg);
+void SetModImportStatus(bool ok, const std::string& msg);
 bool ConsumeRetryRequest();
 RuntimeStatus GetStatus();
 
@@ -96,6 +103,9 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps);
 // Implemented in android_main.cpp (JNI bridge to ScarfaceActivity)
 void OpenIsoPicker();
 void OpenFolderPicker();
+void ExportSavesZip();
+void ImportSavesZip();
+void ImportModZip();
 bool HasAllFilesAccess();
 void RequestAllFilesAccess();
 int OpenPersistedUriFd(const std::string& uri);

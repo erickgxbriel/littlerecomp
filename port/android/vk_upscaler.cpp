@@ -388,7 +388,7 @@ void Upscaler::Draw(VkCommandBuffer cmd, uint32_t frame_idx, VkImageView src_vie
     const float lw = float(logical_w);
     const float lh = float(logical_h);
     float vx = 0.0f, vy = 0.0f, vw = lw, vh = lh;
-    if (aspect_mode != 1) {
+    if (aspect_mode == 0) {
         const float aspect = widescreen ? (16.0f / 9.0f) : (4.0f / 3.0f);
         vw = std::min(lw, lh * aspect);
         vh = vw / aspect;

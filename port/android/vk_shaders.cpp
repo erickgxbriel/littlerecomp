@@ -252,11 +252,12 @@ std::string RegDest(uint32_t r) { return r == 12 ? "oPos" : F("R%u", r); }
 std::string PretransformedEpilogue(bool quad, bool is_point, bool is_sprite, float point_max) {
     std::string s = "    precise vec4 p = oPos;\n    p.w = magclamp(p.w);\n    precise vec4 q;\n";
     if (quad) s += "    out_quad_e.xy = p.xy;\n";
-    s += "    if (surf.w == 0.0 && abs(p.x - (surf.x - 0.5)) < 1e-3) p.x = surf.x;\n";
+    s += "    if (surf.w == 0.0 && zparams.w >= 0.999 && abs(p.x - (surf.x - 0.5)) < 1e-3) p.x = surf.x;\n";
     s += "    if (surf.w == 0.0 && abs(p.y - (surf.y - 0.5)) < 1e-3) p.y = surf.y;\n";
     if (quad) s += "    out_quad_e.zw = p.xy;\n";
     s += R"(
     q.x = p.x * 2.0 / surf.x - 1.0;
+    if (zparams.w > 0.0 && zparams.w < 0.999 && abs(p.w - 1.0) > 1e-3) q.x *= zparams.w;
     q.y = 1.0 - p.y * 2.0 / surf.y;
     q.z = p.z * surf.z;
     q.xyz *= p.w;
@@ -727,9 +728,10 @@ std::string FixedVertexGlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     s += "    oFog = " + v(5, "vec4(0.0)") + ";\n";
     if (pretransformed) return s + PretransformedEpilogue(quad, is_point, is_sprite, point_max);
 
+    s += "    if (zparams.w > 0.0 && zparams.w < 0.999 && abs(cp.w - 1.0) > 1e-3) cp.x *= zparams.w;\n";
     s += "    vec2 sp = (vec2(cp.x, -cp.y) / cp.w + 1.0) * 0.5 * surf.xy;\n";
     if (quad) s += "    out_quad_e.xy = sp;\n";
-    s += "    if (surf.w == 0.0 && abs(sp.x - (surf.x - 0.5)) < 1e-3) cp.x = cp.w;\n";
+    s += "    if (surf.w == 0.0 && zparams.w >= 0.999 && abs(sp.x - (surf.x - 0.5)) < 1e-3) cp.x = cp.w;\n";
     s += "    if (surf.w == 0.0 && abs(sp.y - (surf.y - 0.5)) < 1e-3) cp.y = -cp.w;\n";
     if (quad) s += "    out_quad_e.zw = (vec2(cp.x, -cp.y) / cp.w + 1.0) * 0.5 * surf.xy;\n";
     s += R"(
@@ -943,7 +945,7 @@ void main() {
 namespace {
 
 constexpr uint32_t kSpvCacheMagic = 0x43565053u;  // "SPVC"
-constexpr uint32_t kSpvCacheVer = 3u;
+constexpr uint32_t kSpvCacheVer = 4u;
 
 }  // namespace
 

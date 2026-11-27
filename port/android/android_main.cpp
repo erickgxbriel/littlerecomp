@@ -21,6 +21,7 @@
 #include <imgui.h>
 #include <backends/imgui_impl_sdl3.h>
 
+#include "achievements.h"
 #include "android_adpf.h"
 #include "android_app.h"
 #include "audio/oboe_control.h"
@@ -34,6 +35,7 @@
 #include "kernel/disc.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
+#include "ptbr_loc.h"
 #include "touch_controls.h"
 #include "vk_context.h"
 
@@ -81,6 +83,28 @@ Java_com_scarfacedroid_app_ScarfaceActivity_nativeOnFolderPicked(JNIEnv* env, jc
     }
 }
 
+extern "C" __attribute__((visibility("default"))) JNIEXPORT void JNICALL
+Java_com_scarfacedroid_app_ScarfaceActivity_nativeOnSavesResult(JNIEnv* env, jclass, jboolean ok, jstring jmsg) {
+    std::string msg;
+    if (env && jmsg) {
+        const char* m = env->GetStringUTFChars(jmsg, nullptr);
+        msg = m ? m : "";
+        if (m) env->ReleaseStringUTFChars(jmsg, m);
+    }
+    app::SetSavesStatus(ok == JNI_TRUE, msg);
+}
+
+extern "C" __attribute__((visibility("default"))) JNIEXPORT void JNICALL
+Java_com_scarfacedroid_app_ScarfaceActivity_nativeOnModImportResult(JNIEnv* env, jclass, jboolean ok, jstring jmsg) {
+    std::string msg;
+    if (env && jmsg) {
+        const char* m = env->GetStringUTFChars(jmsg, nullptr);
+        msg = m ? m : "";
+        if (m) env->ReleaseStringUTFChars(jmsg, m);
+    }
+    app::SetModImportStatus(ok == JNI_TRUE, msg);
+}
+
 namespace app {
 
 namespace {
@@ -110,6 +134,9 @@ std::string JStringToStd(JNIEnv* env, jstring js) {
 
 void OpenIsoPicker() { CallVoidActivityMethod("openIsoPicker"); }
 void OpenFolderPicker() { CallVoidActivityMethod("openFolderPicker"); }
+void ExportSavesZip() { CallVoidActivityMethod("exportSavesZip"); }
+void ImportSavesZip() { CallVoidActivityMethod("importSavesZip"); }
+void ImportModZip() { CallVoidActivityMethod("importModZip"); }
 void RequestAllFilesAccess() { CallVoidActivityMethod("requestAllFilesAccess"); }
 
 bool HasAllFilesAccess() {
@@ -389,7 +416,7 @@ void LaunchGameBootAsync() {
         }
 
         app::SetStatusStage(i18n::T(i18n::Str::StatusRunningBeta), false, true);
-        LOGR("boot: Scarface guest running cleanly on ARM64 (v0.2.0-beta)");
+        LOGR("boot: Scarface guest running cleanly on ARM64 (v0.4.0-beta)");
         g_boot_in_flight.store(false);
     }).detach();
 }
@@ -471,13 +498,16 @@ int main(int, char**) {
     app::SetStorageDir(storage);
 
     logx::Init((app::ExeDir() / "logs").string(), app::kGame.log);
-    LOGR("LittleRecomp v0.2.0-beta starting, storage=%s", app::ExeDir().string().c_str());
+    LOGR("LittleRecomp v0.4.0-beta starting, storage=%s", app::ExeDir().string().c_str());
 
     adpf::Init();
     cpu_affinity::Init();
     app::Load();
     touch::LoadLayout();
     i18n::SetLanguage(static_cast<i18n::Lang>(app::AndroidSettings().language), app::GetSystemLanguageCode());
+    achievements::Load();
+    ptbr_loc::Load();
+    kernel::SetModsOverrideDir((app::ExeDir() / "mods").string(), app::AndroidSettings().mods_enabled);
     if (app::kGame.init) app::kGame.init();
 
     SDL_Window* window = SDL_CreateWindow("LittleRecomp", 0, 0,
@@ -524,6 +554,7 @@ int main(int, char**) {
     LaunchGameBootAsync();
 
     auto last_batt_poll = std::chrono::steady_clock::now() - std::chrono::seconds(5);
+    auto last_ach_poll = std::chrono::steady_clock::now();
     bool running = true;
     while (running) {
         bool had_ui_event = false;
@@ -602,6 +633,11 @@ int main(int, char**) {
             app::SetCachedBatteryTempC(app::QueryBatteryTempC());
             last_batt_poll = now;
         }
+        if (app::GetStatus().game_booted &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_ach_poll).count() >= 500) {
+            achievements::Poll();
+            last_ach_poll = now;
+        }
 
         if (app::ConsumeRetryRequest()) {
             LaunchGameBootAsync();
@@ -616,11 +652,14 @@ int main(int, char**) {
             if (app::GetStatus().game_booted) {
                 touch::DrawOverlay(float(vk.Width()), float(vk.Height()), ex.touch_opacity,
                                    app::EffectiveTouchEnabled(), app::OverlayOpen());
+                ptbr_loc::DrawSubtitleOverlay(float(vk.Width()), float(vk.Height()));
             }
             app::DrawAndroidOverlay(float(vk.Width()), float(vk.Height()), ImGui::GetIO().Framerate);
+            achievements::DrawToast(float(vk.Width()), float(vk.Height()));
         }, ui_active);
     }
 
+    achievements::Save();
     app::Save();
     adpf::Shutdown();
     logx::Flush();

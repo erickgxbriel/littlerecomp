@@ -19,6 +19,10 @@ namespace {
 std::mutex g_links_lock;
 std::map<std::string, std::string> g_links;    // upper case "\??\D:" -> "\Device\CdRom0"
 std::map<std::string, fs::path> g_devices;     // upper case device -> host directory
+fs::path g_mods_dir;
+bool g_mods_enabled = false;
+bool g_mods_has_files = false;
+std::atomic<size_t> g_mods_hits{0};
 constexpr char kCdRom[] = "\\DEVICE\\CDROM0";
 
 std::string Upper(std::string s) {
@@ -209,6 +213,24 @@ void MountDefaults(const std::string& game_dir, const std::string& data_dir) {
     LOGI("files: D: is %s, hard disk under %s", disc ? disc->Path().string().c_str() : game_dir.c_str(), data_dir.c_str());
 }
 
+void SetModsOverrideDir(const std::string& dir, bool enabled) {
+    std::lock_guard<std::mutex> lock(g_links_lock);
+    g_mods_dir = dir;
+    g_mods_enabled = enabled;
+    g_mods_has_files = false;
+    if (enabled && !g_mods_dir.empty()) {
+        std::error_code ec;
+        if (fs::is_directory(g_mods_dir, ec)) {
+            auto it = fs::directory_iterator(g_mods_dir, ec);
+            g_mods_has_files = (it != fs::directory_iterator());
+        }
+    }
+    LOGI("files: mods override %s (dir=%s, has_files=%d)",
+         enabled ? "ON" : "OFF", g_mods_dir.string().c_str(), int(g_mods_has_files));
+}
+
+size_t ModsOverrideHitCount() { return g_mods_hits.load(std::memory_order_relaxed); }
+
 bool CreateSymbolicLink(const std::string& link, const std::string& target) {
     std::lock_guard<std::mutex> lock(g_links_lock);
     g_links[Upper(Normalize(link))] = Normalize(target);
@@ -272,8 +294,18 @@ Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
     // no Xbox name holds ':', and fs::path would take "D:" as a host drive
     for (auto& part : parts)
         if (part.find(':') != std::string::npos) return {};
-    if (best->first == kCdRom)
+    if (best->first == kCdRom) {
+        if (g_mods_enabled && g_mods_has_files && !g_mods_dir.empty() && !parts.empty()) {
+            fs::path ov = MatchCase(g_mods_dir, parts);
+            std::error_code ec;
+            if (fs::is_regular_file(ov, ec)) {
+                g_mods_hits.fetch_add(1, std::memory_order_relaxed);
+                LOG_FIRST(30, "files: mod override -> %s", ov.string().c_str());
+                return {ov.string(), false, nullptr};
+            }
+        }
         if (const Disc* disc = MountedDisc()) return {{}, true, disc->Find(parts)};
+    }
     return {MatchCase(best->second, parts).string()};
 }
 

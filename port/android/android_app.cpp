@@ -1,5 +1,6 @@
 #include "android_app.h"
 
+#include <sys/stat.h>
 #include <time.h>
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <imgui.h>
 #include <toml++/toml.hpp>
 
+#include "achievements.h"
 #include "android_adpf.h"
 #include "audio/oboe_control.h"
 #include "common/kbm.h"
@@ -23,6 +25,8 @@
 #include "core/log.h"
 #include "cpu_affinity.h"
 #include "i18n.h"
+#include "kernel/kernel.h"
+#include "ptbr_loc.h"
 #include "touch_controls.h"
 #include "vk_context.h"
 
@@ -43,6 +47,116 @@ std::atomic<bool> g_open_credits_requested{false};
 
 std::mutex g_status_lock;
 RuntimeStatus g_status;
+
+struct SaveSlotInfo {
+    std::string id;
+    std::string title;
+    std::string date_str;
+    uint64_t size_kb = 0;
+    fs::path path;
+};
+
+std::mutex g_saves_lock;
+bool g_saves_dirty = true;
+bool g_saves_status_ok = true;
+std::string g_saves_status_msg;
+std::vector<SaveSlotInfo> g_save_slots;
+
+std::mutex g_mod_lock;
+bool g_mod_status_ok = true;
+std::string g_mod_status_msg;
+
+std::string DecodeSaveMetaName(const fs::path& meta_path) {
+    std::ifstream f(meta_path, std::ios::binary);
+    if (!f) return {};
+    std::vector<uint8_t> raw((std::istreambuf_iterator<char>(f)), {});
+    if (raw.size() < 4) return {};
+
+    size_t off = 0;
+    bool utf16le = (raw[0] == 0xFF && raw[1] == 0xFE);
+    if (utf16le) off = 2;
+
+    std::string utf8;
+    auto push_cp = [&](uint32_t cp) {
+        if (cp < 0x80u) {
+            utf8.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800u) {
+            utf8.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+            utf8.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        } else {
+            utf8.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+            utf8.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+            utf8.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        }
+    };
+
+    if (utf16le || (raw.size() >= 6 && raw[1] == 0 && raw[3] == 0)) {
+        for (size_t i = off; i + 1 < raw.size(); i += 2) {
+            uint16_t ch = uint16_t(raw[i]) | (uint16_t(raw[i + 1]) << 8);
+            if (ch == 0) break;
+            if (ch != '\r') push_cp(ch);
+        }
+    } else {
+        for (uint8_t b : raw) {
+            if (b == 0) break;
+            if (b != '\r') utf8.push_back(static_cast<char>(b));
+        }
+    }
+
+    std::istringstream iss(utf8);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.rfind("Name=", 0) == 0) {
+            std::string val = line.substr(5);
+            while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
+            return val;
+        }
+    }
+    return {};
+}
+
+std::string FormatMtime(const fs::path& p) {
+    struct stat st{};
+    if (stat(p.c_str(), &st) != 0) return "--";
+    struct tm tm_buf{};
+    localtime_r(&st.st_mtime, &tm_buf);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d",
+                  tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+                  tm_buf.tm_hour, tm_buf.tm_min);
+    return buf;
+}
+
+void RefreshSaveSlotsLocked() {
+    g_save_slots.clear();
+    fs::path title_dir = ExeDir() / "hdd" / "E" / "UDATA" / "5655003f";
+    std::error_code ec;
+    if (!fs::is_directory(title_dir, ec)) return;
+
+    for (const auto& entry : fs::directory_iterator(title_dir, ec)) {
+        if (!entry.is_directory(ec)) continue;
+        SaveSlotInfo info;
+        info.path = entry.path();
+        info.id = entry.path().filename().string();
+        info.title = DecodeSaveMetaName(info.path / "SaveMeta.xbx");
+        if (info.title.empty()) info.title = info.id;
+
+        uint64_t total_bytes = 0;
+        for (const auto& f : fs::recursive_directory_iterator(info.path, ec)) {
+            if (f.is_regular_file(ec)) {
+                total_bytes += uint64_t(f.file_size(ec));
+            }
+        }
+        info.size_kb = std::max<uint64_t>(1, (total_bytes + 1023u) / 1024u);
+
+        fs::path dat = info.path / "save.dat";
+        info.date_str = FormatMtime(fs::exists(dat, ec) ? dat : info.path);
+        g_save_slots.push_back(std::move(info));
+    }
+    std::sort(g_save_slots.begin(), g_save_slots.end(), [](const SaveSlotInfo& a, const SaveSlotInfo& b) {
+        return a.date_str > b.date_str;
+    });
+}
 
 fs::path SettingsFile() { return ExeDir() / kGame.settings; }
 
@@ -211,6 +325,23 @@ void SetPickedGameFolder(const std::string& path) {
     g_overlay_open.store(false, std::memory_order_release);
 }
 
+void SetSavesStatus(bool ok, const std::string& msg) {
+    std::lock_guard<std::mutex> lock(g_saves_lock);
+    g_saves_status_ok = ok;
+    g_saves_status_msg = msg;
+    g_saves_dirty = true;
+}
+
+void SetModImportStatus(bool ok, const std::string& msg) {
+    if (ok) {
+        ptbr_loc::ReloadExternal();
+        kernel::SetModsOverrideDir((ExeDir() / "mods").string(), AndroidSettings().mods_enabled);
+    }
+    std::lock_guard<std::mutex> lock(g_mod_lock);
+    g_mod_status_ok = ok;
+    g_mod_status_msg = msg;
+}
+
 bool ConsumeRetryRequest() {
     std::lock_guard<std::mutex> lock(g_status_lock);
     bool r = g_status.retry_requested;
@@ -267,17 +398,22 @@ void Load() {
     ex.touch_opacity = static_cast<float>(t["android_touch_opacity"].value_or(double(ex.touch_opacity)));
     ex.render_scale = std::clamp(static_cast<float>(t["android_render_scale"].value_or(double(ex.render_scale))), 0.60f, 2.25f);
     ex.upscaler = std::clamp(int(t["android_upscaler"].value_or(int64_t(ex.upscaler))), 0, 2);
-    ex.aspect_mode = std::clamp(int(t["android_aspect_mode"].value_or(int64_t(ex.aspect_mode))), 0, 1);
+    ex.aspect_mode = std::clamp(int(t["android_aspect_mode"].value_or(int64_t(ex.aspect_mode))), 0, 2);
     ex.pin_big_cores = t["android_pin_big_cores"].value_or(ex.pin_big_cores);
     ex.hud_mode = std::clamp(int(t["android_hud_mode"].value_or(int64_t(s.show_fps ? 2 : ex.hud_mode))), 0, 3);
     ex.language = std::clamp(int(t["android_language"].value_or(int64_t(ex.language))), 0, 2);
     ex.native_aux_rt = t["android_native_aux_rt"].value_or(ex.native_aux_rt);
+    ex.half_aux_rt = t["android_half_aux_rt"].value_or(ex.half_aux_rt);
     ex.thermal_drs = t["android_thermal_drs"].value_or(ex.thermal_drs);
     ex.touch_auto_aim_fire = t["android_touch_auto_aim_fire"].value_or(ex.touch_auto_aim_fire);
     ex.swapchain_prerotate = t["android_prerotate"].value_or(ex.swapchain_prerotate);
     ex.low_vram_tex = t["android_low_vram_tex"].value_or(ex.low_vram_tex);
     ex.controller_rumble = t["android_rumble"].value_or(ex.controller_rumble);
     ex.auto_hide_touch_with_pad = t["android_auto_hide_touch"].value_or(ex.auto_hide_touch_with_pad);
+    ex.ptbr_mode = std::clamp(int(t["android_ptbr_mode"].value_or(int64_t(ex.ptbr_mode))), 0, 2);
+    ex.subtitle_scale = std::clamp(static_cast<float>(t["android_subtitle_scale"].value_or(double(ex.subtitle_scale))), 0.80f, 1.60f);
+    ex.mods_enabled = t["android_mods_enabled"].value_or(ex.mods_enabled);
+    ex.capture_subtitles = t["android_capture_subtitles"].value_or(ex.capture_subtitles);
     ex.game_uri = t["android_game_uri"].value_or(ex.game_uri);
     ex.game_display_name = t["android_game_display_name"].value_or(ex.game_display_name);
 
@@ -311,12 +447,17 @@ void Save() {
                   {"android_hud_mode", int64_t(ex.hud_mode)},
                   {"android_language", int64_t(ex.language)},
                   {"android_native_aux_rt", ex.native_aux_rt},
+                  {"android_half_aux_rt", ex.half_aux_rt},
                   {"android_thermal_drs", ex.thermal_drs},
                   {"android_touch_auto_aim_fire", ex.touch_auto_aim_fire},
                   {"android_prerotate", ex.swapchain_prerotate},
                   {"android_low_vram_tex", ex.low_vram_tex},
                   {"android_rumble", ex.controller_rumble},
                   {"android_auto_hide_touch", ex.auto_hide_touch_with_pad},
+                  {"android_ptbr_mode", int64_t(ex.ptbr_mode)},
+                  {"android_subtitle_scale", double(ex.subtitle_scale)},
+                  {"android_mods_enabled", ex.mods_enabled},
+                  {"android_capture_subtitles", ex.capture_subtitles},
                   {"android_game_uri", ex.game_uri},
                   {"android_game_display_name", ex.game_display_name}};
     for (const Option& o : kGame.options) {
@@ -653,8 +794,8 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
 
                     ImGui::Text("%s:", i18n::T(i18n::Str::LblAspect));
                     ImGui::SameLine();
-                    if (ImGui::RadioButton(i18n::T(i18n::Str::Aspect16x9), ex.aspect_mode == 0)) {
-                        ex.aspect_mode = 0;
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::AspectUltrawide), ex.aspect_mode == 2)) {
+                        ex.aspect_mode = 2;
                         Save();
                     }
                     ImGui::SameLine();
@@ -662,11 +803,16 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
                         ex.aspect_mode = 1;
                         Save();
                     }
-                    ImGui::SameLine(0.0f, 20.0f);
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::Aspect16x9), ex.aspect_mode == 0)) {
+                        ex.aspect_mode = 0;
+                        Save();
+                    }
+                    ImGui::SameLine(0.0f, 16.0f);
                     if (ImGui::Checkbox(i18n::T(i18n::Str::LblVsync), &s.vsync)) {
                         Save();
                     }
-                    ImGui::SameLine(0.0f, 20.0f);
+                    ImGui::SameLine(0.0f, 16.0f);
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.14f, 0.19f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.86f, 0.20f, 0.25f, 1.0f));
                     if (ImGui::Button(i18n::T(i18n::Str::BtnLowEndPreset))) {
@@ -705,8 +851,11 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
                         ImGui::TableSetColumnIndex(0);
                         if (ImGui::Checkbox(i18n::T(i18n::Str::LblExperimental60Fps), &s.experimental_60fps)) Save();
                         ImGui::TableSetColumnIndex(1);
-                        if (ImGui::Checkbox(i18n::T(i18n::Str::LblNativeAuxRt), &ex.native_aux_rt)) Save();
-                        ImGui::TextDisabled("  %s", i18n::T(i18n::Str::LblNativeAuxRtHint));
+                        if (ImGui::Checkbox(i18n::T(i18n::Str::LblHalfAuxRt), &ex.half_aux_rt)) {
+                            if (ex.half_aux_rt) ex.native_aux_rt = true;
+                            Save();
+                        }
+                        ImGui::TextDisabled("  %s", i18n::T(i18n::Str::LblHalfAuxRtHint));
 
                         ImGui::TableNextRow();
                         ImGui::TableSetColumnIndex(0);
@@ -794,12 +943,177 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
                 ImGui::EndTabItem();
             }
 
+            if (ImGui::BeginTabItem(i18n::T(i18n::Str::TabSaves))) {
+                static std::string confirm_del_id;
+                static auto confirm_del_tp = std::chrono::steady_clock::now();
+
+                std::vector<SaveSlotInfo> slots_copy;
+                std::string status_copy;
+                bool status_ok_copy = true;
+                {
+                    std::lock_guard<std::mutex> lock(g_saves_lock);
+                    if (g_saves_dirty) {
+                        RefreshSaveSlotsLocked();
+                        g_saves_dirty = false;
+                    }
+                    slots_copy = g_save_slots;
+                    status_copy = g_saves_status_msg;
+                    status_ok_copy = g_saves_status_ok;
+                }
+
+                if (ImGui::BeginChild("##TabBody", ImVec2(0, -footer_h), false)) {
+                    EnableTouchDragScroll();
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.14f, 0.19f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.86f, 0.20f, 0.25f, 1.0f));
+                    if (ImGui::Button(i18n::T(i18n::Str::BtnExportSaves))) {
+                        ExportSavesZip();
+                    }
+                    ImGui::PopStyleColor(2);
+                    ImGui::SameLine();
+                    if (ImGui::Button(i18n::T(i18n::Str::BtnImportSaves))) {
+                        ImportSavesZip();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button(i18n::T(i18n::Str::BtnRefreshSaves))) {
+                        std::lock_guard<std::mutex> lock(g_saves_lock);
+                        g_saves_dirty = true;
+                        g_saves_status_msg.clear();
+                    }
+
+                    ImGui::TextDisabled("%s", i18n::T(i18n::Str::SavesHint));
+                    if (!status_copy.empty()) {
+                        ImGui::TextColored(status_ok_copy ? ImVec4(0.55f, 0.95f, 0.62f, 1.0f)
+                                                          : ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
+                                           "%s", status_copy.c_str());
+                    }
+                    ImGui::Separator();
+
+                    if (slots_copy.empty()) {
+                        ImGui::TextDisabled("%s", i18n::T(i18n::Str::SavesEmpty));
+                    } else if (ImGui::BeginTable("##SavesTable", 5,
+                                                 ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg |
+                                                 ImGuiTableFlags_SizingStretchProp)) {
+                        ImGui::TableSetupColumn(i18n::T(i18n::Str::SavesColName), ImGuiTableColumnFlags_WidthStretch, 2.2f);
+                        ImGui::TableSetupColumn(i18n::T(i18n::Str::SavesColSlot), ImGuiTableColumnFlags_WidthStretch, 1.3f);
+                        ImGui::TableSetupColumn(i18n::T(i18n::Str::SavesColDate), ImGuiTableColumnFlags_WidthStretch, 1.4f);
+                        ImGui::TableSetupColumn(i18n::T(i18n::Str::SavesColSize), ImGuiTableColumnFlags_WidthStretch, 0.7f);
+                        ImGui::TableSetupColumn("##Del", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                        ImGui::TableHeadersRow();
+
+                        const auto now = std::chrono::steady_clock::now();
+                        if (!confirm_del_id.empty() &&
+                            std::chrono::duration_cast<std::chrono::seconds>(now - confirm_del_tp).count() >= 5) {
+                            confirm_del_id.clear();
+                        }
+
+                        for (const SaveSlotInfo& sl : slots_copy) {
+                            ImGui::TableNextRow();
+                            ImGui::PushID(sl.id.c_str());
+                            ImGui::TableSetColumnIndex(0);
+                            ImGui::TextUnformatted(sl.title.c_str());
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::TextDisabled("%s", sl.id.c_str());
+                            ImGui::TableSetColumnIndex(2);
+                            ImGui::TextUnformatted(sl.date_str.c_str());
+                            ImGui::TableSetColumnIndex(3);
+                            ImGui::Text("%llu KB", static_cast<unsigned long long>(sl.size_kb));
+                            ImGui::TableSetColumnIndex(4);
+
+                            bool armed = (confirm_del_id == sl.id);
+                            if (armed) {
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.82f, 0.14f, 0.14f, 1.0f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.92f, 0.22f, 0.22f, 1.0f));
+                            }
+                            if (ImGui::Button(armed ? i18n::T(i18n::Str::BtnConfirmDelete)
+                                                    : i18n::T(i18n::Str::BtnDeleteSave))) {
+                                if (armed) {
+                                    std::error_code ec;
+                                    fs::remove_all(sl.path, ec);
+                                    confirm_del_id.clear();
+                                    SetSavesStatus(!ec, ec ? ec.message() : ("Deleted " + sl.id));
+                                } else {
+                                    confirm_del_id = sl.id;
+                                    confirm_del_tp = now;
+                                }
+                            }
+                            if (armed) ImGui::PopStyleColor(2);
+                            ImGui::PopID();
+                        }
+                        ImGui::EndTable();
+                    }
+                }
+                ImGui::EndChild();
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem(i18n::T(i18n::Str::TabAchievements))) {
+                if (ImGui::BeginChild("##TabBody", ImVec2(0, -footer_h), false)) {
+                    EnableTouchDragScroll();
+                    achievements::DrawTab();
+                }
+                ImGui::EndChild();
+                ImGui::EndTabItem();
+            }
+
             if (ImGui::BeginTabItem(i18n::T(i18n::Str::TabGameLang))) {
                 if (ImGui::BeginChild("##TabBody", ImVec2(0, -footer_h), false)) {
                     EnableTouchDragScroll();
                     ImGui::Text("%s:", i18n::T(i18n::Str::LblUiLanguage));
                     ImGui::SameLine();
                     DrawLanguagePills();
+                    ImGui::Separator();
+
+                    ImGui::TextColored(ImVec4(0.95f, 0.25f, 0.30f, 1.0f), "%s", i18n::T(i18n::Str::HdrPtBrMods));
+                    ImGui::Text("%s:", i18n::T(i18n::Str::LblPtBrGameMode));
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::PtBrOff), ex.ptbr_mode == 0)) {
+                        ex.ptbr_mode = 0;
+                        Save();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::PtBrOverlayOnly), ex.ptbr_mode == 1)) {
+                        ex.ptbr_mode = 1;
+                        Save();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(i18n::T(i18n::Str::PtBrNativeAndOverlay), ex.ptbr_mode == 2)) {
+                        ex.ptbr_mode = 2;
+                        Save();
+                    }
+                    if (ex.ptbr_mode > 0) {
+                        if (ImGui::SliderFloat(i18n::T(i18n::Str::LblSubtitleScale), &ex.subtitle_scale, 0.80f, 1.60f, "%.2fx")) {
+                            Save();
+                        }
+                    }
+                    if (ImGui::Checkbox(i18n::T(i18n::Str::LblModsEnabled), &ex.mods_enabled)) {
+                        kernel::SetModsOverrideDir((ExeDir() / "mods").string(), ex.mods_enabled);
+                        Save();
+                    }
+                    if (ImGui::Checkbox(i18n::T(i18n::Str::LblCaptureSubs), &ex.capture_subtitles)) {
+                        Save();
+                    }
+                    if (ImGui::Button(i18n::T(i18n::Str::BtnImportModZip))) {
+                        ImportModZip();
+                    }
+                    {
+                        std::string mod_msg;
+                        bool mod_ok = true;
+                        {
+                            std::lock_guard<std::mutex> lk(g_mod_lock);
+                            mod_msg = g_mod_status_msg;
+                            mod_ok = g_mod_status_ok;
+                        }
+                        if (!mod_msg.empty()) {
+                            ImGui::SameLine();
+                            ImGui::TextColored(mod_ok ? ImVec4(0.55f, 0.95f, 0.62f, 1.0f)
+                                                      : ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
+                                               "%s", mod_msg.c_str());
+                        }
+                    }
+                    ImGui::TextDisabled(i18n::T(i18n::Str::LblLocStatus),
+                                        ptbr_loc::BuiltinCount(), ptbr_loc::ExternalCount(),
+                                        static_cast<unsigned long long>(kernel::ModsOverrideHitCount()),
+                                        ptbr_loc::CapturedCount());
                     ImGui::Separator();
 
                     if (ImGui::Checkbox(i18n::T(i18n::Str::LblSkipIntro), &s.skip_intro)) Save();

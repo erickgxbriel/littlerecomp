@@ -82,6 +82,9 @@ public:
     bool HasWireframe() const { return has_wireframe_; }
     bool HasPreciseOcclusion() const { return has_precise_occlusion_; }
     bool HasLazyMemory() const { return has_lazy_memory_; }
+    bool HasTimelineSemaphore() const { return has_timeline_sem_; }
+    bool GetSemaphoreCounter(VkSemaphore sem, uint64_t& out_val) const;
+    VkResult WaitTimelineSemaphore(VkSemaphore sem, uint64_t val, uint64_t timeout_ns) const;
     VkFormat DepthFormat() const { return depth_format_; }
     float MaxPointSize() const { return point_size_max_; }
     VkDeviceSize MinUboAlignment() const { return min_ubo_align_; }
@@ -113,6 +116,9 @@ private:
     bool has_wireframe_ = false;
     bool has_precise_occlusion_ = false;
     bool has_lazy_memory_ = false;
+    bool has_timeline_sem_ = false;
+    PFN_vkGetSemaphoreCounterValue pfn_get_sem_counter_ = nullptr;
+    PFN_vkWaitSemaphores pfn_wait_sems_ = nullptr;
     VkFormat depth_format_ = VK_FORMAT_D24_UNORM_S8_UINT;
     float point_size_max_ = 1.0f;
     VkDeviceSize min_ubo_align_ = 256;

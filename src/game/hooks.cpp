@@ -12,6 +12,10 @@
 #include "core/log.h"
 #include "game/hud_prompts.h"
 #include "kernel/memory.h"
+#ifdef SCARFACE_ANDROID_APP
+#include "achievements.h"
+#include "ptbr_loc.h"
+#endif
 
 // The startup state machine sets up a playlist of the five publisher logos through sub_00028940 and only advances to
 // the menu after the manager finishes it. The manager finishes in phase 5, which restores the script update mask the
@@ -31,6 +35,12 @@ X86_EXTERN_FUNC(__imp__sub_00249300);
 X86_EXTERN_FUNC(__imp__sub_00240570);
 X86_EXTERN_FUNC(__imp__sub_00099BC0);
 X86_EXTERN_FUNC(sub_0006FB50);  // guest script evaluator, called only for queued diagnostic commands
+#ifdef SCARFACE_ANDROID_APP
+X86_EXTERN_FUNC(__imp__sub_000EDA20);
+X86_EXTERN_FUNC(__imp__sub_000EDA60);
+X86_EXTERN_FUNC(__imp__sub_00190C40);
+X86_EXTERN_FUNC(__imp__sub_001911D0);
+#endif
 
 namespace hud_prompts {
 
@@ -1373,6 +1383,14 @@ X86_FUNC(sub_0024D900) {
             }
         }
     }
+#ifdef SCARFACE_ANDROID_APP
+    if (token && mem_base && plain) {
+        if (uint32_t loc = ptbr_loc::TranslateTextBible(mem_base, token, plain)) {
+            ctx.eax = loc;
+            return;
+        }
+    }
+#endif
 }
 
 // Remember the line being expanded so the token dispatcher can choose a label from the words around the token.
@@ -1540,3 +1558,35 @@ X86_FUNC(sub_00240570) {
              key_labels ? "keyboard" : "pad");
     hud_prompts::SetMusicLibraryPage(music, key_labels);
 }
+
+#ifdef SCARFACE_ANDROID_APP
+// DataBase singleton lifecycle hooks (thiscall: ecx = DataBase*).
+// Used by the offline achievement engine for O(1) state inspection without touching game logic or FPS.
+X86_FUNC(sub_000EDA20) {
+    uint32_t db = ctx.ecx;
+    __imp__sub_000EDA20(ctx, base);
+    achievements::OnDataBaseConstructed(ctx.eax ? ctx.eax : db);
+}
+
+X86_FUNC(sub_000EDA60) {
+    uint32_t db = ctx.ecx;
+    achievements::OnDataBaseDestroyed(db);
+    __imp__sub_000EDA60(ctx, base);
+}
+
+// HUDSubtitle wide string setter: sub_00190C40 reads arg2 ([esp+8] at entry) as UTF-16LE subtitle pointer.
+X86_FUNC(sub_00190C40) {
+    uint32_t wide_va = mem::Base() ? X86_MEM32(ctx.esp + 8) : 0;
+    ptbr_loc::OnSubtitleActivated(wide_va);
+    __imp__sub_00190C40(ctx, base);
+}
+
+// HUDSubtitle visibility setter (ret 0x04): arg1 == 0 hides the active subtitle.
+X86_FUNC(sub_001911D0) {
+    uint32_t vis = mem::Base() ? X86_MEM32(ctx.esp + 4) : 1;
+    if (vis == 0) {
+        ptbr_loc::OnSubtitleDeactivated();
+    }
+    __imp__sub_001911D0(ctx, base);
+}
+#endif

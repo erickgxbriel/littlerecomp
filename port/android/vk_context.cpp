@@ -46,13 +46,23 @@ bool Context::Init(SDL_Window* window, const std::filesystem::path& cache_dir) {
         return false;
     }
 
+    uint32_t inst_ver = VK_API_VERSION_1_1;
+    if (auto fpEnumVer = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+            vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"))) {
+        uint32_t queried = 0;
+        if (fpEnumVer(&queried) == VK_SUCCESS) {
+            if (queried >= VK_API_VERSION_1_3) inst_ver = VK_API_VERSION_1_3;
+            else if (queried >= VK_API_VERSION_1_2) inst_ver = VK_API_VERSION_1_2;
+        }
+    }
+
     VkApplicationInfo app_info{};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app_info.pApplicationName = "LittleRecomp";
     app_info.applicationVersion = VK_MAKE_VERSION(0, 3, 0);
     app_info.pEngineName = "XbeRecomp";
     app_info.engineVersion = VK_MAKE_VERSION(0, 1, 0);
-    app_info.apiVersion = VK_API_VERSION_1_1;
+    app_info.apiVersion = inst_ver;
 
     VkInstanceCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -142,10 +152,21 @@ bool Context::Init(SDL_Window* window, const std::filesystem::path& cache_dir) {
         }
     }
 
-    LOGR("vk: GPU=%s Vulkan=%s driver=0x%X BC=%u ASTC=%u ETC2=%u lazyMem=%u depthFmt=%d pointMax=%.1f uboAlign=%llu aniso=%.1f",
+    bool want_timeline_sem = false;
+    if (inst_ver >= VK_API_VERSION_1_2 && props.apiVersion >= VK_API_VERSION_1_2) {
+        if (auto fpGetFeats2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+                vkGetInstanceProcAddr(instance_, "vkGetPhysicalDeviceFeatures2"))) {
+            VkPhysicalDeviceVulkan12Features vk12_feats{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+            VkPhysicalDeviceFeatures2 feats2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &vk12_feats};
+            fpGetFeats2(physical_, &feats2);
+            want_timeline_sem = (vk12_feats.timelineSemaphore == VK_TRUE);
+        }
+    }
+
+    LOGR("vk: GPU=%s Vulkan=%s driver=0x%X BC=%u ASTC=%u ETC2=%u lazyMem=%u timelineSemCap=%u depthFmt=%d pointMax=%.1f uboAlign=%llu aniso=%.1f",
          props.deviceName, ver, props.driverVersion,
          unsigned(has_bc_), feats.textureCompressionASTC_LDR, feats.textureCompressionETC2,
-         unsigned(has_lazy_memory_), int(depth_format_), point_size_max_,
+         unsigned(has_lazy_memory_), unsigned(want_timeline_sem), int(depth_format_), point_size_max_,
          static_cast<unsigned long long>(min_ubo_align_), max_aniso_);
 
     VkPhysicalDeviceFeatures enable_feats{};
@@ -155,6 +176,9 @@ bool Context::Init(SDL_Window* window, const std::filesystem::path& cache_dir) {
     enable_feats.independentBlend = feats.independentBlend;
     enable_feats.fillModeNonSolid = feats.fillModeNonSolid;
     enable_feats.textureCompressionBC = feats.textureCompressionBC;
+
+    VkPhysicalDeviceVulkan12Features enable_vk12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    enable_vk12.timelineSemaphore = want_timeline_sem ? VK_TRUE : VK_FALSE;
 
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{};
@@ -166,6 +190,7 @@ bool Context::Init(SDL_Window* window, const std::filesystem::path& cache_dir) {
     const char* dev_exts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
     VkDeviceCreateInfo dci{};
     dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    dci.pNext = want_timeline_sem ? &enable_vk12 : nullptr;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = 1;
@@ -177,6 +202,14 @@ bool Context::Init(SDL_Window* window, const std::filesystem::path& cache_dir) {
         return false;
     }
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
+
+    if (want_timeline_sem) {
+        pfn_get_sem_counter_ = reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(
+            vkGetDeviceProcAddr(device_, "vkGetSemaphoreCounterValue"));
+        pfn_wait_sems_ = reinterpret_cast<PFN_vkWaitSemaphores>(
+            vkGetDeviceProcAddr(device_, "vkWaitSemaphores"));
+        has_timeline_sem_ = (pfn_get_sem_counter_ != nullptr && pfn_wait_sems_ != nullptr);
+    }
 
     LoadPipelineCache();
     shader_cache_.Init(device_, cache_dir_ / "spv_cache.bin");
@@ -827,7 +860,7 @@ bool Context::RenderFrame(const std::function<void()>& build_imgui, bool ui_acti
     vkBeginCommandBuffer(f.cmd, &cbbi);
 
     const bool full_cover = (snap_slot >= 0 && snap.view != VK_NULL_HANDLE &&
-                             app::AndroidSettings().aspect_mode == 1 && render_pass_dont_care_ != VK_NULL_HANDLE);
+                             app::AndroidSettings().aspect_mode >= 1 && render_pass_dont_care_ != VK_NULL_HANDLE);
     VkClearValue clear{};
     clear.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
     VkRenderPassBeginInfo rpbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -884,6 +917,24 @@ bool Context::RenderFrame(const std::function<void()>& build_imgui, bool ui_acti
 
     frame_idx_ = (frame_idx_ + 1) % kFramesInFlight;
     return true;
+}
+
+bool Context::GetSemaphoreCounter(VkSemaphore sem, uint64_t& out_val) const {
+    if (!has_timeline_sem_ || !pfn_get_sem_counter_ || device_ == VK_NULL_HANDLE || sem == VK_NULL_HANDLE) {
+        return false;
+    }
+    return pfn_get_sem_counter_(device_, sem, &out_val) == VK_SUCCESS;
+}
+
+VkResult Context::WaitTimelineSemaphore(VkSemaphore sem, uint64_t val, uint64_t timeout_ns) const {
+    if (!has_timeline_sem_ || !pfn_wait_sems_ || device_ == VK_NULL_HANDLE || sem == VK_NULL_HANDLE) {
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+    VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+    wi.semaphoreCount = 1;
+    wi.pSemaphores = &sem;
+    wi.pValues = &val;
+    return pfn_wait_sems_(device_, &wi, timeout_ns);
 }
 
 void Context::Shutdown() {

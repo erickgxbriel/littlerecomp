@@ -1,6 +1,6 @@
 # LittleRecomp — *Scarface: The World Is Yours* (Android ARM64 Port)
 
-`v0.1.0-beta` | [Leia em Português (BR)](README.pt-BR.md) | [Credits & Attribution](CREDITS.md)
+`v0.4.0-beta` | [Leia em Português (BR)](README.pt-BR.md) | [Credits & Attribution](CREDITS.md)
 
 **LittleRecomp** ([github.com/erickgxbriel/littlerecomp](https://github.com/erickgxbriel/littlerecomp)) is an unofficial native **Android (`arm64-v8a`) + Vulkan 1.1 TBDR** port of **[efm-games/scarface-recomp](https://github.com/efm-games/scarface-recomp)** (static recompilation of the Original Xbox version of *Scarface: The World Is Yours*).
 
@@ -33,17 +33,19 @@
    - Alternatively, tap **Select Game Folder** to pick an extracted folder with `default.xbe` (requires "All Files Access" permission).
 4. Play with the on-screen touch controls or connect any Bluetooth/USB controller (Xbox / PlayStation / Switch).
 5. Tap **MENU** in the **top-right corner** at any time to adjust:
-   - **Graphics:** Internal resolution scale (`1.0x / 1.5x / 2.0x`), single-pass FP16 upscaler (**Snapdragon GSR v1**, **FSR 1.0**, **Bilinear**), **Native Aux Effects (`1.0x`)**, **Thermal DRS**, **Experimental 60 FPS**, big-core CPU pinning, and **Performance HUD** (**Off**, **Compact: FPS + GPU °C**, **Full Telemetry**).
-   - **Controls:** Virtual touch opacity/toggle, GTA-style driving preset (`modern_pad`).
-   - **Game & Language:** UI language (`Auto / PT-BR / EN`), Skip Intro, Pause Cheats.
+   - **Graphics:** Internal resolution scale (`0.6x / 0.75x / 1.0x / 1.5x / 2.0x / 2.25x`), aspect mode (**True Ultrawide** default, Fullscreen Stretch, 16:9), single-pass FP16 upscaler (**Snapdragon GSR v1**, **FSR 1.0**, **Bilinear**), **Anisotropic Filtering** (`2x–16x`), **VSync**, **Swapchain Pre-Rotation**, **Light Textures (-75% VRAM)**, **Low-End Phone Preset**, optional **Fast Aux Effects (`0.5x`)** & **Smart DRS (FPS + Thermal)**, **Experimental 60 FPS**, big-core CPU pinning, and **Performance HUD** (**Off**, **FPS Only**, **Basic**, **Advanced**).
+   - **Controls:** Virtual touch opacity/toggle, **Touch Layout Editor**, **Touch Auto-Aim + Fire**, **Auto-Hide Touch With Gamepad**, **Controller Rumble**, and GTA-style driving preset (`modern_pad`).
+   - **Saves:** In-app Save Manager with slot metadata viewer, 2-tap deletion, and **Export/Import Backup (`.zip`)** via Android SAF.
+   - **Achievements:** 45 offline achievements (500 pts, aligned with RA #20684), O(1) 2 Hz RAM polling (0% FPS impact), **Hardcore `[HC]`** badge detection, retroactive save sync, and animated toast banners.
+   - **Game & Language:** UI language (`Auto / PT-BR / EN`), **Hybrid PT-BR Localization** (native `TextBible` menus + HD TrueType subtitle overlay + external `mods/ptbr/*.tsv` packs), **`mods/` File Override Layer**, **Import Mod / PT-BR Pack (`.zip`)**, Skip Intro, and Pause Cheats.
 
 ---
 
 ## Mobile Features Implemented in LittleRecomp
-- **Native Vulkan 1.1 TBDR Renderer:** `LAZILY_ALLOCATED` + `TRANSIENT_ATTACHMENT` depth buffers (zero DRAM spills), render-pass coalescing, pre-pass `upload_cmd` texture streaming, `1.0x` off-screen auxiliary effects option, persistent `VkPipelineCache` + SPIR-V disk cache (`spv_cache.bin`).
+- **Native Vulkan 1.1 / 1.2+ TBDR Renderer:** `LAZILY_ALLOCATED` + `TRANSIENT_ATTACHMENT` depth buffers (zero DRAM spills), render-pass coalescing, **True Ultrawide 20:9** perspective correction, Vulkan 1.2/1.3 `VK_KHR_timeline_semaphore` fast path (with 1.1 fence fallback), pre-pass `upload_cmd` texture streaming, `TexSlabAllocator` (16 MB VRAM slabs), `MemSigFast()` 64-bit texture hashing, persistent `VkPipelineCache` + SPIR-V disk cache (`spv_cache.bin`), and 512 KB ISO LRU cache.
 - **Universal Compatibility:** Dynamic `features.textureCompressionBC` check (ARM64 NEON BC1–BC3 decode runs only on mobile GPUs lacking native BCn), dynamic `cpuinfo_max_freq` heterogeneous CPU big-core detection, and dynamic `libandroid.so` ADPF / Thermal status loading.
 - **FP16 Single-Pass Upscaling:** Snapdragon GSR v1 (default), FSR 1.0 EASU+RCAS, and Bilinear with hardware gamma LUT.
-- **Low-Latency Audio:** Google Oboe (AAudio / OpenSL ES) mixing DirectSound + Xbox ADPCM.
+- **Low-Latency Audio & Controls:** Google Oboe (AAudio / OpenSL ES) mixing DirectSound + Xbox ADPCM, arcade vector touch overlay with custom layout editor, and physical controller support.
 
 ---
 

@@ -183,6 +183,8 @@ std::vector<ThreadRef> Threads();
 
 // files
 void MountDefaults(const std::string& game_dir, const std::string& data_dir);
+void SetModsOverrideDir(const std::string& dir, bool enabled);
+size_t ModsOverrideHitCount();
 bool CreateSymbolicLink(const std::string& link, const std::string& target);
 bool DeleteSymbolicLink(const std::string& link);
 std::string QuerySymbolicLink(const std::string& link);

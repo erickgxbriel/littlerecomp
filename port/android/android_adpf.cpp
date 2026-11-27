@@ -258,59 +258,91 @@ ThermalInfo PollThermal(float battery_fallback_c) {
     return info;
 }
 
-float ComputeEffectiveScale(float requested_scale, bool drs_enabled, int thermal_status) {
+float ComputeEffectiveScale(float requested_scale, bool drs_enabled, int thermal_status,
+                            float current_fps, uint32_t target_fps) {
     if (!drs_enabled) return requested_scale;
 
-    static int s_tier = 0;  // 0 = full requested, 1 = -0.5x step, 2 = floor 1.0x
+    static constexpr float kLadder[] = {2.25f, 2.0f, 1.5f, 1.25f, 1.0f, 0.85f, 0.75f, 0.60f};
+    static constexpr int kLadderN = int(sizeof(kLadder) / sizeof(kLadder[0]));
+
+    static int s_tier = 0;  // steps down from requested_scale along kLadder
     static float s_last_req = -1.0f;
-    static std::chrono::steady_clock::time_point s_hot_since{};
+    static std::chrono::steady_clock::time_point s_pressure_since{};
     static std::chrono::steady_clock::time_point s_cool_since{};
 
     if (std::abs(requested_scale - s_last_req) > 0.05f) {
         s_last_req = requested_scale;
         s_tier = 0;
-        s_hot_since = {};
+        s_pressure_since = {};
         s_cool_since = {};
     }
 
-    auto now = std::chrono::steady_clock::now();
-    if (thermal_status >= 3) {  // SEVERE or worse
-        s_cool_since = {};
-        if (s_hot_since.time_since_epoch().count() == 0) {
-            s_hot_since = now;
-        } else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_hot_since).count() >= 3) {
-            if (s_tier < 2) {
-                ++s_tier;
-                LOGR("adpf: Thermal DRS stepping down tier=%d (status=%d)", s_tier, thermal_status);
-            }
-            s_hot_since = now;
+    int base_idx = 0;
+    float best_d = 99.0f;
+    for (int i = 0; i < kLadderN; ++i) {
+        float d = std::abs(kLadder[i] - requested_scale);
+        if (d < best_d) {
+            best_d = d;
+            base_idx = i;
         }
-    } else if (thermal_status <= 1) {  // NONE or LIGHT
-        s_hot_since = {};
+    }
+    const int max_tier = (kLadderN - 1) - base_idx;
+    if (s_tier > max_tier) s_tier = max_tier;
+
+    const float tgt = float(target_fps >= 55u ? 60u : 30u);
+    const bool thermal_severe = (thermal_status >= 3);  // SEVERE+: aggressive cooling rescue down to 0.60x
+    const bool thermal_mod = (thermal_status == 2);     // MODERATE: gentle trim down to 1.00x floor (0.85x if FPS < 88%)
+    const bool thermal_hot = thermal_severe || thermal_mod;
+    const bool fps_low = (current_fps > 5.0f && current_fps < tgt * 0.88f);
+    const bool thermal_ok = (thermal_status <= 1);
+    const bool fps_headroom = (current_fps <= 5.0f || current_fps >= tgt * 0.96f);
+
+    // Only allow dropping below 1.0x under SEVERE+ heat, or MODERATE heat + low FPS (if requested >= 1.0x).
+    const float min_scale = thermal_severe ? 0.60f : ((thermal_mod && fps_low) ? 0.85f : 0.99f);
+    int eff_max_tier = max_tier;
+    if (requested_scale >= 0.99f) {
+        eff_max_tier = 0;
+        for (int i = base_idx; i < kLadderN - 1; ++i) {
+            if (kLadder[i + 1] < min_scale) break;
+            ++eff_max_tier;
+        }
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    if ((thermal_hot || fps_low) && s_tier < eff_max_tier) {
+        s_cool_since = {};
+        if (s_pressure_since.time_since_epoch().count() == 0) {
+            s_pressure_since = now;
+        } else {
+            const int64_t hold_ms = thermal_severe ? 2500 : (fps_low ? 2500 : 6000);
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_pressure_since).count() >= hold_ms) {
+                if (s_tier < eff_max_tier) {
+                    ++s_tier;
+                    LOGR("adpf: Smart DRS step-down %.2fx -> %.2fx (therm=%d fps=%.1f/%u)",
+                         kLadder[base_idx + s_tier - 1], kLadder[base_idx + s_tier],
+                         thermal_status, current_fps, unsigned(tgt));
+                }
+                s_pressure_since = now;
+            }
+        }
+    } else if (thermal_ok && (fps_headroom || s_tier > eff_max_tier)) {
+        s_pressure_since = {};
         if (s_tier > 0) {
             if (s_cool_since.time_since_epoch().count() == 0) {
                 s_cool_since = now;
-            } else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_cool_since).count() >= 15) {
+            } else if (std::chrono::duration_cast<std::chrono::seconds>(now - s_cool_since).count() >= 14) {
                 --s_tier;
-                LOGR("adpf: Thermal DRS restoring tier=%d (status=%d)", s_tier, thermal_status);
+                LOGR("adpf: Smart DRS restore -> %.2fx (therm=%d fps=%.1f/%u)",
+                     kLadder[base_idx + s_tier], thermal_status, current_fps, unsigned(tgt));
                 s_cool_since = now;
             }
         }
     } else {
-        s_hot_since = {};
+        s_pressure_since = {};
         s_cool_since = {};
     }
 
-    if (s_tier == 0) return requested_scale;
-    if (s_tier == 1) {
-        if (requested_scale > 1.6f) return 1.5f;
-        if (requested_scale > 1.1f) return 1.0f;
-        if (requested_scale > 0.8f) return 0.75f;
-        return 0.60f;
-    }
-    if (requested_scale > 1.1f) return 1.0f;
-    if (requested_scale > 0.78f) return 0.75f;
-    return 0.60f;
+    return (s_tier == 0) ? requested_scale : kLadder[base_idx + s_tier];
 }
 
 }  // namespace adpf

@@ -535,6 +535,13 @@ void DrawOverlay(float view_w, float view_h, float opacity, bool enabled, bool o
     const float a = editing ? std::max(0.75f, opacity) : std::clamp(opacity, 0.1f, 0.95f);
     const bool draw_all = enabled || editing;
 
+    auto draw_centered_text = [&](float cx, float cy, const char* lbl, ImU32 col) {
+        ImVec2 ts = ImGui::CalcTextSize(lbl);
+        ImVec2 pos(cx - ts.x * 0.5f, cy - ts.y * 0.5f);
+        dl->AddText(ImVec2(pos.x + 1.0f, pos.y + 1.0f), IM_COL32(0, 0, 0, int(a * 200)), lbl);
+        dl->AddText(pos, col, lbl);
+    };
+
     for (const CircleBtn& b : layout.buttons) {
         if (!draw_all && b.zone != Zone::MenuPill) continue;
         bool pressed = false;
@@ -545,18 +552,132 @@ void DrawOverlay(float view_w, float view_h, float opacity, bool enabled, bool o
             }
         }
         const bool is_fire_rt = (b.zone == Zone::BtnRT && auto_aim_fire_armed);
-        const char* lbl = is_fire_rt ? "FIRE" : b.label;
+        const ImU32 text_col = IM_COL32(255, 255, 255, int(std::min(1.0f, a + 0.28f) * 255));
+        const ImU32 dark_fill = IM_COL32(18, 22, 30, int(a * 165));
 
-        ImU32 fill = pressed ? IM_COL32(255, 196, 64, int(a * 170)) : IM_COL32(24, 28, 36, int(a * 140));
-        ImU32 border = pressed ? IM_COL32(255, 224, 120, int(a * 240))
-                     : is_fire_rt ? IM_COL32(235, 76, 86, int(std::min(1.0f, a + 0.25f) * 255))
-                                  : IM_COL32(220, 226, 235, int(a * 185));
-        ImU32 text_col = IM_COL32(255, 255, 255, int(std::min(1.0f, a + 0.25f) * 255));
+        if (b.zone == Zone::BtnA || b.zone == Zone::BtnB || b.zone == Zone::BtnX || b.zone == Zone::BtnY) {
+            int cr = 255, cg = 255, cb = 255;
+            if (b.zone == Zone::BtnA) { cr = 64; cg = 217; cb = 89; }
+            else if (b.zone == Zone::BtnB) { cr = 242; cg = 68; cb = 68; }
+            else if (b.zone == Zone::BtnX) { cr = 59; cg = 158; cb = 255; }
+            else if (b.zone == Zone::BtnY) { cr = 245; cg = 199; cb = 49; }
 
-        dl->AddCircleFilled(ImVec2(b.cx, b.cy), b.r, fill, 28);
-        dl->AddCircle(ImVec2(b.cx, b.cy), b.r, border, 28, is_fire_rt ? 2.5f : 2.0f);
-        ImVec2 ts = ImGui::CalcTextSize(lbl);
-        dl->AddText(ImVec2(b.cx - ts.x * 0.5f, b.cy - ts.y * 0.5f), text_col, lbl);
+            if (pressed) {
+                dl->AddCircleFilled(ImVec2(b.cx, b.cy), b.r + 5.0f, IM_COL32(cr, cg, cb, int(a * 95)), 32);
+            }
+            ImU32 fill = pressed ? IM_COL32(cr, cg, cb, int(a * 175)) : dark_fill;
+            ImU32 outer = IM_COL32(235, 240, 248, int(a * (pressed ? 235 : 135)));
+            ImU32 inner = IM_COL32(cr, cg, cb, int(std::min(1.0f, a + 0.25f) * 255));
+            dl->AddCircleFilled(ImVec2(b.cx, b.cy), b.r, fill, 32);
+            dl->AddCircle(ImVec2(b.cx, b.cy), b.r, outer, 32, 1.5f);
+            dl->AddCircle(ImVec2(b.cx, b.cy), std::max(4.0f, b.r - 3.5f), inner, 32, pressed ? 3.0f : 2.3f);
+            draw_centered_text(b.cx, b.cy, b.label, pressed ? IM_COL32(255, 255, 255, 255) : inner);
+        } else if (b.zone == Zone::DpadUp || b.zone == Zone::DpadDown ||
+                   b.zone == Zone::DpadLeft || b.zone == Zone::DpadRight) {
+            const float hs = b.r * 0.90f;
+            const float rnd = b.r * 0.30f;
+            ImVec2 p0(b.cx - hs, b.cy - hs);
+            ImVec2 p1(b.cx + hs, b.cy + hs);
+            ImU32 fill = pressed ? IM_COL32(255, 196, 64, int(a * 185)) : dark_fill;
+            ImU32 border = pressed ? IM_COL32(255, 224, 120, int(a * 245)) : IM_COL32(215, 224, 235, int(a * 165));
+            ImU32 tri_col = pressed ? IM_COL32(22, 24, 30, 245) : text_col;
+            dl->AddRectFilled(p0, p1, fill, rnd);
+            dl->AddRect(p0, p1, border, rnd, 0, 1.8f);
+
+            const float aw = b.r * 0.42f;
+            const float ah = b.r * 0.36f;
+            ImVec2 t0, t1, t2;
+            if (b.zone == Zone::DpadUp) {
+                t0 = ImVec2(b.cx, b.cy - ah);
+                t1 = ImVec2(b.cx - aw, b.cy + ah * 0.85f);
+                t2 = ImVec2(b.cx + aw, b.cy + ah * 0.85f);
+            } else if (b.zone == Zone::DpadDown) {
+                t0 = ImVec2(b.cx, b.cy + ah);
+                t1 = ImVec2(b.cx - aw, b.cy - ah * 0.85f);
+                t2 = ImVec2(b.cx + aw, b.cy - ah * 0.85f);
+            } else if (b.zone == Zone::DpadLeft) {
+                t0 = ImVec2(b.cx - ah, b.cy);
+                t1 = ImVec2(b.cx + ah * 0.85f, b.cy - aw);
+                t2 = ImVec2(b.cx + ah * 0.85f, b.cy + aw);
+            } else {
+                t0 = ImVec2(b.cx + ah, b.cy);
+                t1 = ImVec2(b.cx - ah * 0.85f, b.cy - aw);
+                t2 = ImVec2(b.cx - ah * 0.85f, b.cy + aw);
+            }
+            dl->AddTriangleFilled(t0, t1, t2, tri_col);
+        } else if (is_fire_rt) {
+            // Armed Auto-Aim + Fire reticle button (on-foot)
+            if (pressed) {
+                dl->AddCircleFilled(ImVec2(b.cx, b.cy), b.r + 5.0f, IM_COL32(245, 72, 72, int(a * 110)), 32);
+            }
+            ImU32 fill = pressed ? IM_COL32(235, 68, 68, int(a * 195)) : IM_COL32(48, 16, 20, int(a * 175));
+            ImU32 accent = pressed ? IM_COL32(255, 224, 120, 255) : IM_COL32(245, 82, 88, int(std::min(1.0f, a + 0.30f) * 255));
+            dl->AddCircleFilled(ImVec2(b.cx, b.cy), b.r, fill, 32);
+            dl->AddCircle(ImVec2(b.cx, b.cy), b.r, accent, 32, 2.5f);
+
+            // Vector crosshair reticle above compact label
+            const float ry = b.cy - b.r * 0.12f;
+            const float rr = b.r * 0.36f;
+            dl->AddCircle(ImVec2(b.cx, ry), rr, accent, 24, 1.8f);
+            dl->AddLine(ImVec2(b.cx - rr * 1.45f, ry), ImVec2(b.cx - rr * 0.55f, ry), accent, 1.8f);
+            dl->AddLine(ImVec2(b.cx + rr * 0.55f, ry), ImVec2(b.cx + rr * 1.45f, ry), accent, 1.8f);
+            dl->AddLine(ImVec2(b.cx, ry - rr * 1.45f), ImVec2(b.cx, ry - rr * 0.55f), accent, 1.8f);
+            dl->AddLine(ImVec2(b.cx, ry + rr * 0.55f), ImVec2(b.cx, ry + rr * 1.45f), accent, 1.8f);
+            dl->AddCircleFilled(ImVec2(b.cx, ry), 2.2f, text_col, 12);
+            draw_centered_text(b.cx, b.cy + b.r * 0.56f, "FIRE", text_col);
+        } else if (b.zone == Zone::BtnLT || b.zone == Zone::BtnLB ||
+                   b.zone == Zone::BtnRT || b.zone == Zone::BtnRB) {
+            const float hw = b.r * 0.98f;
+            const float hh = b.r * 0.66f;
+            const float rnd = hh * 0.90f;
+            ImVec2 p0(b.cx - hw, b.cy - hh);
+            ImVec2 p1(b.cx + hw, b.cy + hh);
+            ImU32 fill = pressed ? IM_COL32(255, 196, 64, int(a * 185)) : dark_fill;
+            ImU32 border = pressed ? IM_COL32(255, 224, 120, int(a * 245)) : IM_COL32(215, 224, 235, int(a * 180));
+            dl->AddRectFilled(p0, p1, fill, rnd);
+            dl->AddRect(p0, p1, border, rnd, 0, 2.0f);
+            dl->AddRect(ImVec2(p0.x + 2.5f, p0.y + 2.5f), ImVec2(p1.x - 2.5f, p1.y - 2.5f),
+                        IM_COL32(255, 255, 255, int(a * 45)), std::max(2.0f, rnd - 2.5f), 0, 1.0f);
+            draw_centered_text(b.cx, b.cy, b.label, text_col);
+        } else if (b.zone == Zone::MenuPill) {
+            const float hw = b.r * 1.52f;
+            const float hh = b.r * 0.70f;
+            const float rnd = hh * 0.90f;
+            ImVec2 p0(b.cx - hw, b.cy - hh);
+            ImVec2 p1(b.cx + hw, b.cy + hh);
+            ImU32 fill = pressed ? IM_COL32(215, 52, 62, int(a * 200)) : IM_COL32(24, 26, 34, int(a * 170));
+            ImU32 border = IM_COL32(225, 230, 238, int(a * 190));
+            dl->AddRectFilled(p0, p1, fill, rnd);
+            dl->AddRect(p0, p1, border, rnd, 0, 1.8f);
+            // 3-bar hamburger icon on the left + MENU text cleanly spaced
+            const float bx = b.cx - hw * 0.68f;
+            const float bw = b.r * 0.34f;
+            const float bgap = b.r * 0.21f;
+            for (int row = -1; row <= 1; ++row) {
+                float ly = b.cy + float(row) * bgap;
+                dl->AddLine(ImVec2(bx, ly), ImVec2(bx + bw, ly), text_col, 2.2f);
+            }
+            draw_centered_text(b.cx + b.r * 0.34f, b.cy, "MENU", text_col);
+        } else if (b.zone == Zone::BackPill || b.zone == Zone::StartPill) {
+            const float hw = b.r * 1.22f;
+            const float hh = b.r * 0.64f;
+            const float rnd = hh * 0.90f;
+            ImVec2 p0(b.cx - hw, b.cy - hh);
+            ImVec2 p1(b.cx + hw, b.cy + hh);
+            ImU32 fill = pressed ? IM_COL32(255, 196, 64, int(a * 180)) : dark_fill;
+            ImU32 border = pressed ? IM_COL32(255, 224, 120, int(a * 240)) : IM_COL32(210, 218, 230, int(a * 165));
+            dl->AddRectFilled(p0, p1, fill, rnd);
+            dl->AddRect(p0, p1, border, rnd, 0, 1.6f);
+            draw_centered_text(b.cx, b.cy, b.label, text_col);
+        } else {
+            // L3 / R3
+            ImU32 fill = pressed ? IM_COL32(255, 196, 64, int(a * 175)) : dark_fill;
+            ImU32 border = pressed ? IM_COL32(255, 224, 120, int(a * 240)) : IM_COL32(215, 222, 232, int(a * 175));
+            dl->AddCircleFilled(ImVec2(b.cx, b.cy), b.r, fill, 28);
+            dl->AddCircle(ImVec2(b.cx, b.cy), b.r, border, 28, 1.8f);
+            dl->AddCircle(ImVec2(b.cx, b.cy), std::max(3.0f, b.r - 4.0f), IM_COL32(255, 255, 255, int(a * 50)), 28, 1.0f);
+            draw_centered_text(b.cx, b.cy, b.label, text_col);
+        }
     }
 
     if (draw_all) {
@@ -581,12 +702,24 @@ void DrawOverlay(float view_w, float view_h, float opacity, bool enabled, bool o
                     break;
                 }
             }
-            ImU32 ring_col = active ? IM_COL32(255, 210, 90, int(a * 220)) : IM_COL32(220, 226, 235, int(a * 130));
-            ImU32 bg_col = IM_COL32(20, 24, 30, int(a * 100));
-            ImU32 knob_col = active ? IM_COL32(255, 210, 90, int(a * 200)) : IM_COL32(235, 240, 245, int(a * 140));
-            dl->AddCircleFilled(ImVec2(cx, cy), r, bg_col, 36);
-            dl->AddCircle(ImVec2(cx, cy), r, ring_col, 36, 2.0f);
-            dl->AddCircleFilled(ImVec2(kx, ky), r * 0.36f, knob_col, 24);
+            ImU32 ring_col = active ? IM_COL32(255, 210, 90, int(a * 230)) : IM_COL32(218, 226, 236, int(a * 145));
+            ImU32 inner_ring = IM_COL32(218, 226, 236, int(a * 55));
+            ImU32 bg_col = IM_COL32(16, 20, 28, int(a * 115));
+            ImU32 knob_outer = active ? IM_COL32(255, 204, 72, int(a * 215)) : IM_COL32(220, 228, 238, int(a * 165));
+            ImU32 knob_inner = active ? IM_COL32(255, 235, 165, int(a * 195)) : IM_COL32(42, 48, 60, int(a * 185));
+
+            dl->AddCircleFilled(ImVec2(cx, cy), r, bg_col, 40);
+            dl->AddCircle(ImVec2(cx, cy), r, ring_col, 40, 2.0f);
+            dl->AddCircle(ImVec2(cx, cy), r * 0.66f, inner_ring, 32, 1.2f);
+            // Subtle center guide crosshair
+            const float g = r * 0.16f;
+            dl->AddLine(ImVec2(cx - g, cy), ImVec2(cx + g, cy), inner_ring, 1.2f);
+            dl->AddLine(ImVec2(cx, cy - g), ImVec2(cx, cy + g), inner_ring, 1.2f);
+            // Dual-layer concave stick cap
+            const float kr = r * 0.36f;
+            dl->AddCircleFilled(ImVec2(kx, ky), kr, knob_outer, 28);
+            dl->AddCircleFilled(ImVec2(kx, ky), kr * 0.68f, knob_inner, 24);
+            dl->AddCircle(ImVec2(kx, ky), kr, IM_COL32(255, 255, 255, int(a * 190)), 28, 1.5f);
         };
 
         draw_stick(Zone::LeftStick, layout.ls_cx, layout.ls_cy, layout.ls_r);

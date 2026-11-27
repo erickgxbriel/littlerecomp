@@ -22,6 +22,7 @@ void UpdateTargetFps(uint32_t fps);
 void ReportFrameWorkNs(int64_t actual_ns);
 
 ThermalInfo PollThermal(float battery_fallback_c);
-float ComputeEffectiveScale(float requested_scale, bool drs_enabled, int thermal_status);
+float ComputeEffectiveScale(float requested_scale, bool drs_enabled, int thermal_status,
+                            float current_fps = 0.0f, uint32_t target_fps = 30u);
 
 }  // namespace adpf
