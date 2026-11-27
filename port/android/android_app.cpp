@@ -774,6 +774,11 @@ void DrawAndroidOverlay(float view_w, float view_h, float ui_fps) {
                         Save();
                     }
                     ImGui::SameLine();
+                    if (ImGui::RadioButton("1.75x (840p)", std::fabs(ex.render_scale - 1.75f) < 0.1f)) {
+                        ex.render_scale = 1.75f;
+                        Save();
+                    }
+                    ImGui::SameLine();
                     if (ImGui::RadioButton(i18n::T(i18n::Str::LblScale20), std::fabs(ex.render_scale - 2.0f) < 0.1f)) {
                         ex.render_scale = 2.0f;
                         Save();

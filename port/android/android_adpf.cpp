@@ -262,7 +262,7 @@ float ComputeEffectiveScale(float requested_scale, bool drs_enabled, int thermal
                             float current_fps, uint32_t target_fps) {
     if (!drs_enabled) return requested_scale;
 
-    static constexpr float kLadder[] = {2.25f, 2.0f, 1.5f, 1.25f, 1.0f, 0.85f, 0.75f, 0.60f};
+    static constexpr float kLadder[] = {2.25f, 2.0f, 1.75f, 1.5f, 1.25f, 1.0f, 0.85f, 0.75f, 0.60f};
     static constexpr int kLadderN = int(sizeof(kLadder) / sizeof(kLadder[0]));
 
     static int s_tier = 0;  // steps down from requested_scale along kLadder

@@ -448,12 +448,14 @@ void OnSubtitleActivated(uint32_t wide_va) {
     std::string translated;
     if (LookupTranslationLocked("", orig, translated)) {
         g_active_sub_text = std::move(translated);
+        g_active_sub_tp = std::chrono::steady_clock::now();
+        g_active_sub_visible = true;
     } else {
+        // Keep game's native horizontal subtitle untouched when no PT-BR translation exists yet.
         MaybeCaptureKeyLocked("", orig);
-        g_active_sub_text = std::move(orig);
+        g_active_sub_text.clear();
+        g_active_sub_visible = false;
     }
-    g_active_sub_tp = std::chrono::steady_clock::now();
-    g_active_sub_visible = true;
 }
 
 void OnSubtitleDeactivated() {
@@ -480,9 +482,9 @@ void DrawSubtitleOverlay(float view_w, float view_h) {
     }
 
     const float sub_scale = std::clamp(ex.subtitle_scale, 0.8f, 1.6f);
-    ImGui::SetNextWindowPos(ImVec2(view_w * 0.5f, view_h * 0.855f), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(120.0f, 0.0f),
-                                        ImVec2(std::clamp(view_w * 0.58f, 460.0f, 1180.0f), view_h * 0.25f));
+    const float box_w = std::clamp(view_w * 0.64f, 480.0f, 1280.0f);
+    ImGui::SetNextWindowPos(ImVec2(view_w * 0.5f, view_h * 0.86f), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+    ImGui::SetNextWindowSize(ImVec2(box_w, 0.0f), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.76f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 9.0f));
@@ -491,7 +493,9 @@ void DrawSubtitleOverlay(float view_w, float view_h) {
                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs;
     if (ImGui::Begin("##PtBrSubtitles", nullptr, flags)) {
         ImGui::SetWindowFontScale(sub_scale);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + box_w - 32.0f);
         ImGui::TextWrapped("%s", text.c_str());
+        ImGui::PopTextWrapPos();
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
